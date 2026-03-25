@@ -6,6 +6,8 @@ const chrono = require('chrono-node');
 const low = require('lowdb');
 const FileSync = require('lowdb/adapters/FileSync');
 
+// Trigger redeploy with environment variables update 2026-03-26
+
 const adapter = new FileSync('reminders.json');
 const db = low(adapter);
 db.defaults({ reminders: [], nextId: 1 }).write();
