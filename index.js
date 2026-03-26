@@ -2,7 +2,7 @@ require('dotenv').config();
 const express = require('express');
 const line = require('@line/bot-sdk');
 const cron = require('node-cron');
-const { GoogleGenerativeAI } = require('@google/generative-ai');
+const Groq = require('groq-sdk');
 const low = require('lowdb');
 const FileSync = require('lowdb/adapters/FileSync');
 
@@ -18,9 +18,8 @@ const lineConfig = {
 };
 const client = new line.messagingApi.MessagingApiClient(lineConfig);
 
-// Gemini AI 初始化
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
+// Groq AI 初始化
+const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
 app.post('/webhook', line.middleware(lineConfig), async (req, res) => {
   res.json({ status: 'ok' });
@@ -38,11 +37,11 @@ async function handleMessage(event) {
   let parsed = null;
 
   // 先用 Gemini 解析意圖
-  if (process.env.GEMINI_API_KEY) {
+  if (process.env.GROQ_API_KEY) {
     try {
-      parsed = await parseWithGemini(text);
+      parsed = await parseWithGroq(text);
     } catch (e) {
-      console.error('Gemini 解析失敗，改用關鍵字：', e.message);
+      console.error('Groq 解析失敗，改用關鍵字：', e.message);
     }
   }
 
@@ -74,7 +73,7 @@ async function handleMessage(event) {
   }
 }
 
-async function parseWithGemini(text) {
+async function parseWithGroq(text) {
   const now = new Date();
   const nowStr = now.toLocaleString('zh-TW', {
     timeZone: 'Asia/Taipei',
@@ -82,33 +81,26 @@ async function parseWithGemini(text) {
     hour: '2-digit', minute: '2-digit', weekday: 'long'
   });
 
-  const prompt = `你是LINE提醒機器人的語意解析器。
-現在台灣時間：${nowStr}
+  const completion = await groq.chat.completions.create({
+    model: 'llama-3.3-70b-versatile',
+    messages: [
+      {
+        role: 'system',
+        content: `你是LINE提醒機器人的語意解析器。現在台灣時間：${nowStr}
+回傳純JSON（不要markdown代碼塊）：
+{"intent":"set_reminder|list_reminders|delete_reminder|unknown","content":"提醒內容（去掉時間詞和觸發詞）","datetime":"ISO8601台灣時間或null","deleteId":數字或null}
+規則：1.含提醒我/幫我記得/別忘了/X點/明天/後天/下週/小時後→set_reminder 2.含提醒列表/查看提醒→list_reminders 3.含刪除/取消+數字→delete_reminder 4.其他→unknown 5.datetime必須是未來時間 6.只有時段沒有具體時間：早上預設09:00，下午預設14:00，晚上預設20:00`
+      },
+      { role: 'user', content: text }
+    ],
+    temperature: 0.1,
+    max_tokens: 200
+  });
 
-用戶訊息：「${text}」
-
-請回傳純JSON（不要markdown代碼塊、不要多餘文字）：
-{
-  "intent": "set_reminder" 或 "list_reminders" 或 "delete_reminder" 或 "unknown",
-  "content": "提醒事項內容（去掉時間詞和觸發詞，保留核心事項）",
-  "datetime": "ISO 8601格式的台灣時間，例如2025-03-27T15:00:00+08:00，如果沒有時間則為null",
-  "deleteId": 數字或null
-}
-
-判斷規則：
-1. 含「提醒我、幫我記得、別忘了、記得、X點、明天、後天、下週、等等、分鐘後、小時後」→ intent = "set_reminder"
-2. 含「提醒列表、查看提醒、我的提醒、列出提醒」→ intent = "list_reminders"
-3. 含「刪除、取消、移除」+數字 → intent = "delete_reminder"，deleteId = 數字
-4. 其他 → intent = "unknown"
-5. datetime 必須是未來的時間（晚於現在）
-6. 如果只說時段沒說幾點（如「明天早上」），預設09:00；「今晚」預設20:00`;
-
-  const result = await model.generateContent(prompt);
-  const raw = result.response.text().trim()
+  const raw = completion.choices[0].message.content.trim()
     .replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
 
   const data = JSON.parse(raw);
-
   return {
     intent: data.intent,
     content: data.content || text,
