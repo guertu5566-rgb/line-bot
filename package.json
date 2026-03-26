@@ -8,6 +8,7 @@
     "node-cron": "^3.0.3",
     "dotenv": "^16.4.1",
     "chrono-node": "^2.7.5",
-    "lowdb": "^1.0.0"
+    "lowdb": "^1.0.0",
+    "@google/generative-ai": "^0.21.0"
   }
 }
