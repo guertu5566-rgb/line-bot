@@ -87,7 +87,7 @@ async function handleMessage(event) {
 
 async function parseWithGemini(text) {
   try {
-    const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
+    const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash-latest' });
     const now = new Date();
     const taiwanOffset = 8 * 60 * 60 * 1000;
     const taiwanNow = new Date(now.getTime() + taiwanOffset);
