@@ -5,7 +5,6 @@ const cron = require('node-cron');
 const chrono = require('chrono-node');
 const low = require('lowdb');
 const FileSync = require('lowdb/adapters/FileSync');
-const { GoogleGenerativeAI } = require('@google/generative-ai');
 
 const adapter = new FileSync('reminders.json');
 const db = low(adapter);
@@ -18,10 +17,6 @@ const lineConfig = {
   channelSecret: process.env.LINE_CHANNEL_SECRET
 };
 const client = new line.messagingApi.MessagingApiClient(lineConfig);
-
-const genAI = process.env.GEMINI_API_KEY
-  ? new GoogleGenerativeAI(process.env.GEMINI_API_KEY)
-  : null;
 
 app.post('/webhook', line.middleware(lineConfig), async (req, res) => {
   res.json({ status: 'ok' });
@@ -37,87 +32,202 @@ async function handleMessage(event) {
   const text = event.message.text.trim();
 
   // 查看提醒列表
-  if (/^(提醒列表|查看提醒|我的提醒|列出提醒|有什麼提醒|有哪些提醒)$/.test(text)) {
+  if (/^(提醒列表|查看提醒|我的提醒|列出提醒|有什麼提醒|有哪些提醒|所有提醒|顯示提醒)$/.test(text)) {
     return sendReminderList(userId);
   }
 
   // 刪除提醒
-  const deleteMatch = text.match(/^(刪除|取消|移除)\s*[#＃]?(\d+)$/);
+  const deleteMatch = text.match(/^(刪除|取消|移除|刪掉|砍掉)\s*[#＃]?(\d+)$/);
   if (deleteMatch) {
-    const id = parseInt(deleteMatch[2]);
-    return deleteReminder(userId, id);
+    return deleteReminder(userId, parseInt(deleteMatch[2]));
   }
 
-  // 先嘗試 chrono-node 解析時間
-  const results = chrono.zh.parse(text, new Date());
-  if (results.length > 0) {
-    const remindAt = results[0].date();
-    if (remindAt > new Date()) {
-      const content = text.replace(results[0].text, '').trim() || text;
-      return saveReminder(userId, content, remindAt, event.replyToken);
-    }
+  // 智慧解析
+  const parsed = smartParse(text);
+  if (parsed) {
+    return saveReminder(userId, parsed.content, parsed.remindAt, event.replyToken);
   }
 
-  // 若 chrono 無法解析，使用 Gemini AI
-  if (genAI) {
-    const parsed = await parseWithGemini(text);
-    if (parsed && parsed.isReminder && parsed.remindAt) {
-      const remindAt = new Date(parsed.remindAt);
-      if (remindAt > new Date()) {
-        return saveReminder(userId, parsed.content || text, remindAt, event.replyToken);
-      }
-    }
-    if (parsed && parsed.isList) {
-      return sendReminderList(userId);
-    }
-    if (parsed && parsed.isDelete && parsed.id) {
-      return deleteReminder(userId, parsed.id);
-    }
-  }
-
-  // 無法理解
   await client.replyMessage({
     replyToken: event.replyToken,
     messages: [{
       type: 'text',
-      text: '你好！我是提醒小秘書 📋\n\n設定提醒請說：\n「明天下午3點 開會」\n「下週一早上9點 繳報告」\n「幫我記得後天要交作業」\n\n其他指令：\n• 提醒列表\n• 刪除 編號'
+      text: '你好！我是提醒小秘書 📋\n\n設定提醒請說：\n「明天下午3點 開會」\n「幫我記得後天交報告」\n「一小時後提醒我喝水」\n「下週一早上9點 看醫生」\n「提醒我明晚8點追劇」\n\n其他指令：\n• 提醒列表\n• 刪除 編號'
     }]
   });
 }
 
-async function parseWithGemini(text) {
-  try {
-    const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' }, { apiVersion: 'v1' });
-    const now = new Date();
-    const taiwanOffset = 8 * 60 * 60 * 1000;
-    const taiwanNow = new Date(now.getTime() + taiwanOffset);
-    const nowStr = taiwanNow.toISOString().replace('T', ' ').substring(0, 16);
+function smartParse(text) {
+  const now = new Date();
 
-    const prompt = `現在台北時間是 ${nowStr}。
-使用者說：「${text}」
+  // 1. 先嘗試直接用 chrono-node 解析
+  const direct = tryChronoparse(text, now);
+  if (direct) return direct;
 
-請分析這句話，並以JSON格式回應（只回應JSON，不要其他文字）：
-
-如果是設定提醒：
-{"isReminder":true,"content":"提醒內容","remindAt":"ISO8601格式時間，台北時間UTC+8"}
-
-如果是查看提醒列表：
-{"isList":true}
-
-如果是刪除提醒（如「刪除3號」「取消提醒5」）：
-{"isDelete":true,"id":數字}
-
-如果都不是：
-{"isReminder":false}`;
-
-    const result = await model.generateContent(prompt);
-    const response = result.response.text().trim()
-      .replace(/^```json\n?/, '').replace(/\n?```$/, '');
-    return JSON.parse(response);
-  } catch (e) {
-    console.error('Gemini 解析失敗：', e.message);
-    return null;
+  // 2. 剝除觸發詞後再試
+  const stripped = stripTriggers(text);
+  if (stripped !== text) {
+    const result = tryChronoparse(stripped, now);
+    if (result) return result;
   }
+
+  // 3. 相對時間解析（一小時後、30分鐘後 等）
+  const relative = parseRelativeTime(text, now);
+  if (relative) return relative;
+
+  // 4. 模糊時段解析（今晚、明天早上 等沒有具體時間的）
+  const fuzzy = parseFuzzyTime(text, now);
+  if (fuzzy) return fuzzy;
+
+  return null;
+}
+
+function stripTriggers(text) {
+  const triggers = [
+    '幫我記得', '提醒我', '別忘了', '記得要', '我要提醒自己',
+    '幫我提醒', '幫我記', '記錄一下', '提醒一下', '請提醒我',
+    '請幫我記得', '請幫我提醒', '記得', '不要忘記', '不能忘'
+  ];
+  let result = text;
+  for (const t of triggers) {
+    // 去掉開頭的觸發詞
+    if (result.startsWith(t)) {
+      result = result.slice(t.length).replace(/^[，,、\s]+/, '');
+      break;
+    }
+  }
+  // 去掉結尾的觸發詞
+  for (const t of ['提醒我', '記得', '別忘了']) {
+    if (result.endsWith(t)) {
+      result = result.slice(0, result.length - t.length).replace(/[，,、\s]+$/, '');
+      break;
+    }
+  }
+  return result;
+}
+
+function tryChronoparse(text, now) {
+  const results = chrono.zh.parse(text, now);
+  if (results.length === 0) return null;
+  const remindAt = results[0].date();
+  if (remindAt <= now) return null;
+  const content = text.replace(results[0].text, '').replace(/^[，,、\s]+|[，,、\s]+$/g, '') || text;
+  return { remindAt, content };
+}
+
+function parseRelativeTime(text, now) {
+  // 相對時間模式
+  const patterns = [
+    { regex: /(\d+)\s*小時後/, ms: (m) => parseInt(m[1]) * 3600000 },
+    { regex: /半小時後/, ms: () => 1800000 },
+    { regex: /一個半小時後/, ms: () => 5400000 },
+    { regex: /(\d+)\s*分鐘後/, ms: (m) => parseInt(m[1]) * 60000 },
+    { regex: /(\d+)\s*分後/, ms: (m) => parseInt(m[1]) * 60000 },
+    { regex: /(\d+)\s*天後/, ms: (m) => parseInt(m[1]) * 86400000 },
+    { regex: /(\d+)\s*週後/, ms: (m) => parseInt(m[1]) * 7 * 86400000 },
+    { regex: /(\d+)\s*周後/, ms: (m) => parseInt(m[1]) * 7 * 86400000 },
+  ];
+
+  for (const p of patterns) {
+    const m = text.match(p.regex);
+    if (m) {
+      const remindAt = new Date(now.getTime() + p.ms(m));
+      const content = stripTriggers(text.replace(m[0], '').replace(/^[，,、\s]+|[，,、\s]+$/g, '')) || text;
+      return { remindAt, content };
+    }
+  }
+  return null;
+}
+
+function parseFuzzyTime(text, now) {
+  // 日期關鍵詞對應
+  const dateMap = [
+    { regex: /今天|今日|今/, offset: 0 },
+    { regex: /明天|明日|明/, offset: 1 },
+    { regex: /後天|後日/, offset: 2 },
+    { regex: /大後天/, offset: 3 },
+    { regex: /下週一|下周一|下星期一/, weekday: 1 },
+    { regex: /下週二|下周二|下星期二/, weekday: 2 },
+    { regex: /下週三|下周三|下星期三/, weekday: 3 },
+    { regex: /下週四|下周四|下星期四/, weekday: 4 },
+    { regex: /下週五|下周五|下星期五/, weekday: 5 },
+    { regex: /下週六|下周六|下星期六/, weekday: 6 },
+    { regex: /下週日|下週天|下周日|下周天|下星期日|下星期天/, weekday: 0 },
+  ];
+
+  // 時段關鍵詞對應（小時）
+  const timeMap = [
+    { regex: /凌晨/, hour: 2 },
+    { regex: /早上|早晨|清晨/, hour: 8 },
+    { regex: /上午/, hour: 10 },
+    { regex: /中午/, hour: 12 },
+    { regex: /下午/, hour: 15 },
+    { regex: /傍晚/, hour: 18 },
+    { regex: /晚上|今晚|明晚|夜晚|晚間/, hour: 20 },
+    { regex: /深夜/, hour: 23 },
+  ];
+
+  // 具體小時解析（三點、3點、三點半、3:30 等）
+  const hourMatch = text.match(/([一二三四五六七八九十百千\d]+)\s*[點:：]\s*([0-5]?\d)?/);
+
+  let baseDate = null;
+  let hour = null;
+  let minute = 0;
+
+  // 找日期
+  for (const d of dateMap) {
+    if (d.regex.test(text)) {
+      baseDate = new Date(now);
+      if (d.offset !== undefined) {
+        baseDate.setDate(baseDate.getDate() + d.offset);
+      } else {
+        // 下週某天
+        const today = baseDate.getDay();
+        let diff = d.weekday - today + 7;
+        if (diff <= 7) diff += 7;
+        baseDate.setDate(baseDate.getDate() + diff);
+      }
+      break;
+    }
+  }
+
+  // 找時段
+  for (const t of timeMap) {
+    if (t.regex.test(text)) {
+      hour = t.hour;
+      break;
+    }
+  }
+
+  // 找具體小時
+  if (hourMatch) {
+    const raw = hourMatch[1];
+    const chMap = { '一': 1, '二': 2, '三': 3, '四': 4, '五': 5, '六': 6, '七': 7, '八': 8, '九': 9, '十': 10, '十一': 11, '十二': 12 };
+    hour = chMap[raw] || parseInt(raw);
+    if (hourMatch[2]) minute = parseInt(hourMatch[2]);
+    // 半小時
+    if (/點半/.test(text)) minute = 30;
+    // 下午修正
+    if (/下午|傍晚|晚上|晚間/.test(text) && hour < 12) hour += 12;
+  }
+
+  if (!baseDate && !hour) return null;
+
+  if (!baseDate) baseDate = new Date(now);
+  if (hour !== null) {
+    baseDate.setHours(hour, minute, 0, 0);
+  } else {
+    // 只有日期沒有時間，預設早上9點
+    baseDate.setHours(9, 0, 0, 0);
+  }
+
+  if (baseDate <= now) return null;
+
+  // 提取內容（移除時間相關詞）
+  const timeWords = /今天|明天|後天|大後天|今日|明日|後日|下週[一二三四五六日天]|下周[一二三四五六日天]|下星期[一二三四五六日天]|早上|上午|中午|下午|傍晚|晚上|深夜|凌晨|今晚|明晚|[一二三四五六七八九十百千\d]+\s*[點:：][0-5]?\d?|[點半]/g;
+  let content = stripTriggers(text.replace(timeWords, '').replace(/\s+/g, ' ').trim()) || text;
+
+  return { remindAt: baseDate, content };
 }
 
 async function saveReminder(userId, content, remindAt, replyToken) {
