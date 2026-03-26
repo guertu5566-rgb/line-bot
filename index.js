@@ -5,10 +5,11 @@ const cron = require('node-cron');
 const Groq = require('groq-sdk');
 const low = require('lowdb');
 const FileSync = require('lowdb/adapters/FileSync');
+const { google } = require('googleapis');
 
 const adapter = new FileSync('reminders.json');
 const db = low(adapter);
-db.defaults({ reminders: [], nextId: 1 }).write();
+db.defaults({ reminders: [], nextId: 1, googleTokens: {} }).write();
 
 const app = express();
 
@@ -20,6 +21,94 @@ const client = new line.messagingApi.MessagingApiClient(lineConfig);
 
 // Groq AI 初始化
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+
+// Google OAuth2 初始化
+function getOAuth2Client() {
+  return new google.auth.OAuth2(
+    process.env.GOOGLE_CLIENT_ID,
+    process.env.GOOGLE_CLIENT_SECRET,
+    process.env.GOOGLE_REDIRECT_URI || `https://line-bot-secretary.onrender.com/oauth/google/callback`
+  );
+}
+
+// Google OAuth2 授權路由
+app.get('/oauth/google', (req, res) => {
+  const userId = req.query.userId;
+  if (!userId) return res.status(400).send('Missing userId');
+
+  const oauth2Client = getOAuth2Client();
+  const url = oauth2Client.generateAuthUrl({
+    access_type: 'offline',
+    scope: ['https://www.googleapis.com/auth/calendar.events'],
+    state: userId,
+    prompt: 'consent'
+  });
+  res.redirect(url);
+});
+
+// Google OAuth2 回調
+app.get('/oauth/google/callback', async (req, res) => {
+  const { code, state: userId } = req.query;
+  if (!code || !userId) return res.status(400).send('Missing code or userId');
+
+  try {
+    const oauth2Client = getOAuth2Client();
+    const { tokens } = await oauth2Client.getToken(code);
+    db.get('googleTokens').assign({ [userId]: tokens }).write();
+    res.send(`
+      <html><body style="font-family:sans-serif;text-align:center;padding:50px">
+        <h2>✅ Google 日曆綁定成功！</h2>
+        <p>您的 LINE 提醒小秘書現在會自動把提醒加入 Google 日曆</p>
+        <p>可以關閉此視窗了</p>
+      </body></html>
+    `);
+    // 通知 LINE 用戶綁定成功
+    await client.pushMessage({
+      to: userId,
+      messages: [{ type: 'text', text: '✅ Google 日曆綁定成功！\n\n以後設定提醒時，我也會自動幫您加入 Google 日曆 📅' }]
+    });
+  } catch (e) {
+    console.error('Google OAuth callback error:', e.message);
+    res.status(500).send('授權失敗，請重試');
+  }
+});
+
+// 新增 Google 日曆事件
+async function addToGoogleCalendar(userId, summary, startTime) {
+  const tokens = db.get('googleTokens').get(userId).value();
+  if (!tokens) return false;
+
+  try {
+    const oauth2Client = getOAuth2Client();
+    oauth2Client.setCredentials(tokens);
+
+    // 自動刷新 token
+    oauth2Client.on('tokens', (newTokens) => {
+      const merged = Object.assign({}, tokens, newTokens);
+      db.get('googleTokens').assign({ [userId]: merged }).write();
+    });
+
+    const calendar = google.calendar({ version: 'v3', auth: oauth2Client });
+    const endTime = new Date(startTime.getTime() + 30 * 60000); // 預設30分鐘
+
+    await calendar.events.insert({
+      calendarId: 'primary',
+      resource: {
+        summary: summary,
+        start: { dateTime: startTime.toISOString(), timeZone: 'Asia/Taipei' },
+        end: { dateTime: endTime.toISOString(), timeZone: 'Asia/Taipei' },
+        reminders: {
+          useDefault: false,
+          overrides: [{ method: 'popup', minutes: 10 }]
+        }
+      }
+    });
+    return true;
+  } catch (e) {
+    console.error('Google Calendar 新增失敗：', e.message);
+    return false;
+  }
+}
 
 app.post('/webhook', line.middleware(lineConfig), async (req, res) => {
   res.json({ status: 'ok' });
@@ -34,9 +123,20 @@ async function handleMessage(event) {
   const userId = event.source.userId;
   const text = event.message.text.trim();
 
+  // 綁定 Google 日曆指令
+  if (/綁定.*google|連結.*google|google.*日曆|授權.*日曆|link.*google/i.test(text)) {
+    const authUrl = `https://line-bot-secretary.onrender.com/oauth/google?userId=${userId}`;
+    return client.replyMessage({
+      replyToken: event.replyToken,
+      messages: [{
+        type: 'text',
+        text: `📅 請點以下連結授權 Google 日曆：\n\n${authUrl}\n\n授權後，每次設定提醒都會自動加入您的 Google 日曆！`
+      }]
+    });
+  }
+
   let parsed = null;
 
-  // 先用 Gemini 解析意圖
   if (process.env.GROQ_API_KEY) {
     try {
       parsed = await parseWithGroq(text);
@@ -45,7 +145,6 @@ async function handleMessage(event) {
     }
   }
 
-  // Gemini 沒成功就 fallback 到關鍵字
   if (!parsed) {
     parsed = parseByKeyword(text);
   }
@@ -112,18 +211,15 @@ async function parseWithGroq(text) {
 function parseByKeyword(text) {
   const now = new Date();
 
-  // 查看列表
   if (/提醒列表|查看提醒|我的提醒|列出提醒|有什麼提醒|所有提醒/.test(text)) {
     return { intent: 'list_reminders' };
   }
 
-  // 刪除提醒
   const delMatch = text.match(/[刪取移][除消掉]\s*[#＃]?(\d+)/);
   if (delMatch) {
     return { intent: 'delete_reminder', deleteId: parseInt(delMatch[1]) };
   }
 
-  // 相對時間
   const relMatch = text.match(/(\d+)\s*(小時|分鐘|分)\s*後/);
   if (relMatch) {
     const ms = relMatch[2] === '小時' ? 3600000 : 60000;
@@ -132,7 +228,6 @@ function parseByKeyword(text) {
     return { intent: 'set_reminder', datetime: dt, content: content || text };
   }
 
-  // 半小時後
   if (/半小時後/.test(text)) {
     const dt = new Date(now.getTime() + 1800000);
     const content = text.replace('半小時後', '').replace(/[幫我記得提醒我別忘了]+/g, '').trim();
@@ -152,11 +247,19 @@ async function saveReminder(userId, content, remindAt, replyToken) {
   }).write();
   db.set('nextId', id + 1).write();
 
+  // 加入 Google 日曆
+  const hasGoogle = db.get('googleTokens').get(userId).value();
+  let calendarMsg = '';
+  if (hasGoogle) {
+    const added = await addToGoogleCalendar(userId, content, remindAt);
+    calendarMsg = added ? '\n📅 已同步加入 Google 日曆' : '';
+  }
+
   await client.replyMessage({
     replyToken,
     messages: [{
       type: 'text',
-      text: `✅ 提醒已設定！\n\n📌 ${content}\n⏰ ${formatTime(remindAt)}\n\n編號 #${id}`
+      text: `✅ 提醒已設定！\n\n📌 ${content}\n⏰ ${formatTime(remindAt)}\n\n編號 #${id}${calendarMsg}`
     }]
   });
 }
@@ -167,11 +270,14 @@ async function sendReminderList(userId, replyToken) {
     .filter(r => r.userId === userId && !r.sent && r.remindAt > now)
     .sortBy('remindAt').take(10).value();
 
+  const hasGoogle = db.get('googleTokens').get(userId).value();
+  const googleStatus = hasGoogle ? '📅 Google 日曆：已連結' : '📅 Google 日曆：未連結（傳送「綁定Google日曆」來連結）';
+
   const msg = reminders.length === 0
-    ? '📋 目前沒有待提醒的事項'
+    ? `📋 目前沒有待提醒的事項\n\n${googleStatus}`
     : `📋 您的提醒列表：\n\n${reminders.map(r =>
         `#${r.id} ⏰ ${formatTime(new Date(r.remindAt))}\n📌 ${r.message}`
-      ).join('\n\n')}\n\n輸入「刪除 編號」可刪除`;
+      ).join('\n\n')}\n\n輸入「刪除 編號」可刪除\n\n${googleStatus}`;
 
   await client.replyMessage({
     replyToken,
@@ -198,7 +304,7 @@ async function sendHelp(replyToken) {
     replyToken,
     messages: [{
       type: 'text',
-      text: '你好！我是提醒小秘書 📋\n\n📝 設定提醒範例：\n「明天下午3點開會」\n「幫我記得後天交報告」\n「一小時後提醒我喝水」\n「下週一早上9點看醫生」\n「提醒我今晚8點追劇」\n\n📋 查看提醒：「提醒列表」\n🗑️ 刪除提醒：「刪除 1」'
+      text: '你好！我是提醒小秘書 📋\n\n📝 設定提醒範例：\n「明天下午3點開會」\n「幫我記得後天交報告」\n「一小時後提醒我喝水」\n「下週一早上9點看醫生」\n「提醒我今晚8點追劇」\n\n📋 查看提醒：「提醒列表」\n🗑️ 刪除提醒：「刪除 1」\n📅 連結Google日曆：「綁定Google日曆」'
     }]
   });
 }
