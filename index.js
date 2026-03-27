@@ -6,10 +6,11 @@ const Groq = require('groq-sdk');
 const low = require('lowdb');
 const FileSync = require('lowdb/adapters/FileSync');
 const { google } = require('googleapis');
+const https = require('https');
 
 const adapter = new FileSync('reminders.json');
 const db = low(adapter);
-db.defaults({ reminders: [], nextId: 1, googleTokens: {} }).write();
+db.defaults({ reminders: [], nextId: 1, googleTokens: {}, weatherSubscribers: [] }).write();
 
 const app = express();
 
@@ -21,6 +22,65 @@ const client = new line.messagingApi.MessagingApiClient(lineConfig);
 
 // Groq AI 初始化
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+
+// HTTP GET 工具函數
+function httpsGet(url) {
+  return new Promise((resolve, reject) => {
+    https.get(url, (res) => {
+      let data = '';
+      res.on('data', chunk => data += chunk);
+      res.on('end', () => {
+        try { resolve(JSON.parse(data)); }
+        catch (e) { reject(new Error('JSON parse error: ' + data.substring(0, 100))); }
+      });
+    }).on('error', reject);
+  });
+}
+
+// 取得桃園中壢天氣
+async function fetchZhongliWeather() {
+  const apiKey = process.env.CWA_API_KEY;
+  if (!apiKey) return null;
+
+  try {
+    // 中央氣象署 F-D0047-007：桃園市鄉鎮天氣預報（含中壢區）
+    const url = `https://opendata.cwa.gov.tw/api/v1/rest/datastore/F-D0047-007?Authorization=${apiKey}&locationName=%E4%B8%AD%E5%A3%A2%E5%8D%80&elementName=Wx,MinT,MaxT,PoP12h,UVI`;
+    const data = await httpsGet(url);
+
+    const location = data.records?.locations?.[0]?.location?.[0];
+    if (!location) return null;
+
+    const elements = {};
+    for (const el of location.weatherElement) {
+      elements[el.elementName] = el.time;
+    }
+
+    // 取今日白天（第一個時段）資料
+    const wx    = elements['Wx']?.[0]?.elementValue?.[0]?.value || '無資料';
+    const minT  = elements['MinT']?.[0]?.elementValue?.[0]?.value || '-';
+    const maxT  = elements['MaxT']?.[0]?.elementValue?.[0]?.value || '-';
+    const pop   = elements['PoP12h']?.[0]?.elementValue?.[0]?.value || '-';
+    const uvi   = elements['UVI']?.[0]?.elementValue?.[0]?.value || '-';
+
+    // 天氣圖示對應
+    const wxIcon = wx.includes('雷') ? '⛈️' : wx.includes('雨') ? '🌧️' :
+                   wx.includes('陰') ? '☁️' : wx.includes('多雲') ? '⛅' : '☀️';
+
+    const today = new Date().toLocaleDateString('zh-TW', {
+      timeZone: 'Asia/Taipei', month: 'long', day: 'numeric', weekday: 'long'
+    });
+
+    return `🌤️ 桃園中壢今日天氣\n${today}\n\n` +
+           `${wxIcon} 天氣：${wx}\n` +
+           `🌡️ 氣溫：${minT}°C ～ ${maxT}°C\n` +
+           `☔ 降雨機率：${pop}%\n` +
+           `☀️ 紫外線：${uvi}\n\n` +
+           `資料來源：中央氣象署`;
+  } catch (e) {
+    console.error('天氣取得失敗：', e.message);
+    return null;
+  }
+}
 
 // Google OAuth2 初始化
 function getOAuth2Client() {
@@ -122,6 +182,39 @@ app.post('/webhook', line.middleware(lineConfig), async (req, res) => {
 async function handleMessage(event) {
   const userId = event.source.userId;
   const text = event.message.text.trim();
+
+  // 訂閱每日天氣
+  if (/訂閱天氣|每日天氣|天氣通知|開啟天氣|桃園天氣|中壢天氣/.test(text)) {
+    const subs = db.get('weatherSubscribers').value();
+    if (!subs.includes(userId)) {
+      db.get('weatherSubscribers').push(userId).write();
+    }
+    // 立即發送今日天氣預覽
+    const weather = await fetchZhongliWeather();
+    const preview = weather ? `\n\n📋 今日天氣預覽：\n${weather}` : '\n\n（請確認已設定 CWA_API_KEY 環境變數）';
+    return client.replyMessage({
+      replyToken: event.replyToken,
+      messages: [{ type: 'text', text: `✅ 已訂閱每日天氣通知！\n每天早上 6:00 會自動推播桃園中壢天氣 🌤️${preview}` }]
+    });
+  }
+
+  // 取消天氣訂閱
+  if (/取消天氣|停止天氣|關閉天氣/.test(text)) {
+    db.get('weatherSubscribers').remove(id => id === userId).write();
+    return client.replyMessage({
+      replyToken: event.replyToken,
+      messages: [{ type: 'text', text: '✅ 已取消每日天氣通知' }]
+    });
+  }
+
+  // 查詢今日天氣（即時）
+  if (/今天天氣|現在天氣|查天氣|天氣如何|天氣怎麼樣/.test(text)) {
+    const weather = await fetchZhongliWeather();
+    return client.replyMessage({
+      replyToken: event.replyToken,
+      messages: [{ type: 'text', text: weather || '❌ 天氣資料取得失敗，請稍後再試' }]
+    });
+  }
 
   // 綁定 Google 日曆指令
   if (/綁定.*google|連結.*google|google.*日曆|授權.*日曆|link.*google/i.test(text)) {
@@ -357,7 +450,7 @@ async function sendHelp(replyToken) {
     replyToken,
     messages: [{
       type: 'text',
-      text: '你好！我是提醒小秘書 📋\n\n📝 設定提醒範例：\n「明天下午3點開會」\n「幫我記得後天交報告」\n「一小時後提醒我喝水」\n「下週一早上9點看醫生」\n「提醒我今晚8點追劇」\n\n📋 查看提醒：「提醒列表」\n🗑️ 刪除提醒：「刪除 1」\n📅 連結Google日曆：「綁定Google日曆」'
+      text: '你好！我是提醒小秘書 📋\n\n📝 設定提醒範例：\n「明天下午3點開會」\n「幫我記得後天交報告」\n「一小時後提醒我喝水」\n「下週一早上9點看醫生」\n「提醒我今晚8點追劇」\n\n📋 查看提醒：「提醒列表」\n🗑️ 刪除提醒：「刪除 1」\n📅 連結Google日曆：「綁定Google日曆」\n🌤️ 每日天氣：「訂閱天氣」\n🌤️ 取消天氣：「取消天氣」'
     }]
   });
 }
@@ -397,6 +490,30 @@ cron.schedule('* * * * *', async () => {
       db.get('reminders').find({ id: reminder.id }).assign({ sent: true }).write();
     } catch (e) {
       console.error('推播失敗：', e.message);
+    }
+  }
+});
+
+// 每天早上 6:00 台灣時間推播天氣（UTC 22:00 = 台灣 06:00）
+cron.schedule('0 22 * * *', async () => {
+  const subscribers = db.get('weatherSubscribers').value();
+  if (subscribers.length === 0) return;
+
+  console.log(`[天氣] 開始推播天氣給 ${subscribers.length} 位訂閱者`);
+  const weather = await fetchZhongliWeather();
+  if (!weather) {
+    console.error('[天氣] 取得天氣失敗，跳過推播');
+    return;
+  }
+
+  for (const userId of subscribers) {
+    try {
+      await client.pushMessage({
+        to: userId,
+        messages: [{ type: 'text', text: weather }]
+      });
+    } catch (e) {
+      console.error(`[天氣] 推播失敗 (${userId})：`, e.message);
     }
   }
 });
