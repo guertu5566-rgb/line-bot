@@ -237,29 +237,67 @@ function parseByKeyword(text) {
   return null;
 }
 
-async function saveReminder(userId, content, remindAt, replyToken) {
-  const id = db.get('nextId').value();
-  db.get('reminders').push({
-    id, userId,
-    message: content,
-    remindAt: remindAt.getTime(),
-    sent: false
-  }).write();
-  db.set('nextId', id + 1).write();
+async function saveReminder(userId, content, eventAt, replyToken) {
+  const now = new Date();
+  const groupId = db.get('nextId').value();
+  let nextId = groupId;
+
+  // 計算當天早上 8:00（台灣時間）
+  const eventDateStr = eventAt.toLocaleDateString('en-CA', { timeZone: 'Asia/Taipei' }); // YYYY-MM-DD
+  const morningRemind = new Date(eventDateStr + 'T08:00:00+08:00');
+
+  // 事件前 1 小時
+  const preRemind = new Date(eventAt.getTime() - 60 * 60 * 1000);
+
+  const addedReminders = [];
+
+  // 早上 8 點提醒（僅未來時間）
+  if (morningRemind > now) {
+    db.get('reminders').push({
+      id: nextId, groupId, userId,
+      message: content,
+      eventAt: eventAt.getTime(),
+      remindAt: morningRemind.getTime(),
+      type: 'morning',
+      sent: false
+    }).write();
+    addedReminders.push({ time: morningRemind, label: '🌅 當天早上8點' });
+    nextId++;
+  }
+
+  // 事件前 1 小時提醒（僅未來時間，且與早上8點至少差10分鐘）
+  if (preRemind > now && Math.abs(preRemind.getTime() - morningRemind.getTime()) > 10 * 60000) {
+    db.get('reminders').push({
+      id: nextId, groupId, userId,
+      message: content,
+      eventAt: eventAt.getTime(),
+      remindAt: preRemind.getTime(),
+      type: 'pre',
+      sent: false
+    }).write();
+    addedReminders.push({ time: preRemind, label: '⏰ 事件前1小時' });
+    nextId++;
+  }
+
+  db.set('nextId', nextId).write();
 
   // 加入 Google 日曆
   const hasGoogle = db.get('googleTokens').get(userId).value();
   let calendarMsg = '';
   if (hasGoogle) {
-    const added = await addToGoogleCalendar(userId, content, remindAt);
+    const added = await addToGoogleCalendar(userId, content, eventAt);
     calendarMsg = added ? '\n📅 已同步加入 Google 日曆' : '';
   }
+
+  const reminderLines = addedReminders.length > 0
+    ? addedReminders.map(r => `${r.label}：${formatTime(r.time)}`).join('\n')
+    : '（時間太近，無法設定提醒）';
 
   await client.replyMessage({
     replyToken,
     messages: [{
       type: 'text',
-      text: `✅ 提醒已設定！\n\n📌 ${content}\n⏰ ${formatTime(remindAt)}\n\n編號 #${id}${calendarMsg}`
+      text: `✅ 提醒已設定！\n\n📌 ${content}\n📅 事件時間：${formatTime(eventAt)}\n\n提醒時間：\n${reminderLines}\n\n編號 #${groupId}${calendarMsg}`
     }]
   });
 }
@@ -268,16 +306,30 @@ async function sendReminderList(userId, replyToken) {
   const now = Date.now();
   const reminders = db.get('reminders')
     .filter(r => r.userId === userId && !r.sent && r.remindAt > now)
-    .sortBy('remindAt').take(10).value();
+    .sortBy('remindAt').value();
+
+  // 依 groupId 分組顯示
+  const groups = {};
+  for (const r of reminders) {
+    const key = r.groupId !== undefined ? r.groupId : r.id;
+    if (!groups[key]) groups[key] = { id: key, message: r.message, eventAt: r.eventAt || r.remindAt, times: [] };
+    groups[key].times.push({ type: r.type, time: r.remindAt });
+  }
+
+  const groupList = Object.values(groups).sort((a, b) => a.eventAt - b.eventAt).slice(0, 10);
 
   const hasGoogle = db.get('googleTokens').get(userId).value();
   const googleStatus = hasGoogle ? '📅 Google 日曆：已連結' : '📅 Google 日曆：未連結（傳送「綁定Google日曆」來連結）';
 
-  const msg = reminders.length === 0
+  const msg = groupList.length === 0
     ? `📋 目前沒有待提醒的事項\n\n${googleStatus}`
-    : `📋 您的提醒列表：\n\n${reminders.map(r =>
-        `#${r.id} ⏰ ${formatTime(new Date(r.remindAt))}\n📌 ${r.message}`
-      ).join('\n\n')}\n\n輸入「刪除 編號」可刪除\n\n${googleStatus}`;
+    : `📋 您的提醒列表：\n\n${groupList.map(g => {
+        const timeLines = g.times.map(t => {
+          const label = t.type === 'morning' ? '🌅 早8點' : t.type === 'pre' ? '⏰ 前1小時' : '⏰';
+          return `  ${label}：${formatTime(new Date(t.time))}`;
+        }).join('\n');
+        return `#${g.id} 📌 ${g.message}\n📅 ${formatTime(new Date(g.eventAt))}\n${timeLines}`;
+      }).join('\n\n')}\n\n輸入「刪除 編號」可刪除\n\n${googleStatus}`;
 
   await client.replyMessage({
     replyToken,
@@ -285,16 +337,17 @@ async function sendReminderList(userId, replyToken) {
   });
 }
 
-async function deleteReminder(userId, id, replyToken) {
+async function deleteReminder(userId, groupId, replyToken) {
   const before = db.get('reminders').size().value();
-  db.get('reminders').remove({ id, userId }).write();
+  // 刪除同一組的所有提醒（早上8點 + 事前1小時）
+  db.get('reminders').remove(r => r.userId === userId && (r.groupId === groupId || r.id === groupId)).write();
   const after = db.get('reminders').size().value();
 
   await client.replyMessage({
     replyToken,
     messages: [{
       type: 'text',
-      text: before > after ? `✅ 已刪除提醒 #${id}` : `❌ 找不到提醒 #${id}`
+      text: before > after ? `✅ 已刪除提醒 #${groupId}（共刪除 ${before - after} 筆）` : `❌ 找不到提醒 #${groupId}`
     }]
   });
 }
@@ -322,12 +375,24 @@ cron.schedule('* * * * *', async () => {
   const due = db.get('reminders').filter(r => !r.sent && r.remindAt <= now).value();
   for (const reminder of due) {
     try {
+      const eventTimeStr = reminder.eventAt
+        ? `\n📅 事件時間：${formatTime(new Date(reminder.eventAt))}`
+        : '';
+      const displayId = reminder.groupId !== undefined ? reminder.groupId : reminder.id;
+
+      let text;
+      if (reminder.type === 'morning') {
+        text = `🌅 今日事項提醒！\n\n📌 ${reminder.message}${eventTimeStr}\n\n(編號 #${displayId})`;
+      } else if (reminder.type === 'pre') {
+        text = `⏰ 1小時後即將開始！\n\n📌 ${reminder.message}${eventTimeStr}\n\n(編號 #${displayId})`;
+      } else {
+        // 舊版相容
+        text = `⏰ 提醒時間到！\n\n📌 ${reminder.message}\n\n(提醒 #${reminder.id})`;
+      }
+
       await client.pushMessage({
         to: reminder.userId,
-        messages: [{
-          type: 'text',
-          text: `⏰ 提醒時間到！\n\n📌 ${reminder.message}\n\n(提醒 #${reminder.id})`
-        }]
+        messages: [{ type: 'text', text }]
       });
       db.get('reminders').find({ id: reminder.id }).assign({ sent: true }).write();
     } catch (e) {
