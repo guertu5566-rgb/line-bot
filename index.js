@@ -183,8 +183,8 @@ async function handleMessage(event) {
   const userId = event.source.userId;
   const text = event.message.text.trim();
 
-  // 訂閱每日天氣
-  if (/訂閱天氣|每日天氣|天氣通知|開啟天氣|桃園天氣|中壢天氣/.test(text)) {
+  // 訂閱每日天氣/氣象
+  if (/訂閱(天氣|氣象)|每日(天氣|氣象)|(天氣|氣象)通知|開啟(天氣|氣象)|桃園(天氣|氣象)|中壢(天氣|氣象)/.test(text)) {
     const subs = db.get('weatherSubscribers').value();
     if (!subs.includes(userId)) {
       db.get('weatherSubscribers').push(userId).write();
@@ -198,8 +198,8 @@ async function handleMessage(event) {
     });
   }
 
-  // 取消天氣訂閱
-  if (/取消天氣|停止天氣|關閉天氣/.test(text)) {
+  // 取消天氣/氣象訂閱
+  if (/取消(天氣|氣象)|停止(天氣|氣象)|關閉(天氣|氣象)/.test(text)) {
     db.get('weatherSubscribers').remove(id => id === userId).write();
     return client.replyMessage({
       replyToken: event.replyToken,
@@ -207,8 +207,8 @@ async function handleMessage(event) {
     });
   }
 
-  // 查詢今日天氣（即時）
-  if (/今天天氣|現在天氣|查天氣|天氣如何|天氣怎麼樣/.test(text)) {
+  // 查詢今日天氣/氣象（即時）
+  if (/今天(天氣|氣象)|現在(天氣|氣象)|查(天氣|氣象)|(天氣|氣象)如何|(天氣|氣象)怎麼樣/.test(text)) {
     const weather = await fetchZhongliWeather();
     return client.replyMessage({
       replyToken: event.replyToken,
