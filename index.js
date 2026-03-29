@@ -52,20 +52,27 @@ async function fetchZhongliWeather() {
     const data = await httpsGet(url);
     console.log('[天氣] API 回應:', JSON.stringify(data).substring(0, 200));
 
-    const location = data.records?.locations?.[0]?.location?.[0];
-    if (!location) return null;
-
-    const elements = {};
-    for (const el of location.weatherElement) {
-      elements[el.elementName] = el.time;
+    // 找出「中壢區」的數據
+    const locations = data.records?.Locations?.[0]?.Location || [];
+    const location = locations.find(loc => loc.LocationName === '中壢區');
+    if (!location) {
+      console.error('[天氣] 找不到中壢區的數據');
+      return null;
     }
 
-    // 取今日白天（第一個時段）資料
-    const wx    = elements['Wx']?.[0]?.elementValue?.[0]?.value || '無資料';
-    const minT  = elements['MinT']?.[0]?.elementValue?.[0]?.value || '-';
-    const maxT  = elements['MaxT']?.[0]?.elementValue?.[0]?.value || '-';
-    const pop   = elements['PoP12h']?.[0]?.elementValue?.[0]?.value || '-';
-    const uvi   = elements['UVI']?.[0]?.elementValue?.[0]?.value || '-';
+    // 提取所需的數據（按照值類型而不是字段名）
+    let wx = '無資料', minT = '-', maxT = '-', pop = '-', uvi = '-';
+
+    for (const el of location.WeatherElement || []) {
+      if (!el.Time || !el.Time[0]) continue;
+      const values = el.Time[0].ElementValue?.[0] || {};
+
+      if (values.Weather) wx = values.Weather;
+      if (values.MinTemperature) minT = values.MinTemperature;
+      if (values.MaxTemperature) maxT = values.MaxTemperature;
+      if (values.ProbabilityOfPrecipitation) pop = values.ProbabilityOfPrecipitation;
+      if (values.UVIndex) uvi = values.UVIndex;
+    }
 
     // 天氣圖示對應
     const wxIcon = wx.includes('雷') ? '⛈️' : wx.includes('雨') ? '🌧️' :
