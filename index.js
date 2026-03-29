@@ -40,12 +40,17 @@ function httpsGet(url) {
 // 取得桃園中壢天氣
 async function fetchZhongliWeather() {
   const apiKey = process.env.CWA_API_KEY;
-  if (!apiKey) return null;
+  if (!apiKey) {
+    console.error('[天氣] CWA_API_KEY 未設置');
+    return null;
+  }
 
   try {
     // 中央氣象署 F-D0047-007：桃園市鄉鎮天氣預報（含中壢區）
     const url = `https://opendata.cwa.gov.tw/api/v1/rest/datastore/F-D0047-007?Authorization=${apiKey}&locationName=%E4%B8%AD%E5%A3%A2%E5%8D%80&elementName=Wx,MinT,MaxT,PoP12h,UVI`;
+    console.log('[天氣] 正在取得天氣資料...');
     const data = await httpsGet(url);
+    console.log('[天氣] API 回應:', JSON.stringify(data).substring(0, 200));
 
     const location = data.records?.locations?.[0]?.location?.[0];
     if (!location) return null;
