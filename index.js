@@ -208,7 +208,7 @@ async function handleMessage(event) {
   }
 
   // 查詢今日天氣/氣象（即時）
-  if (/今天(天氣|氣象)|現在(天氣|氣象)|查(天氣|氣象)|(天氣|氣象)如何|(天氣|氣象)怎麼樣/.test(text)) {
+  if (/(^(天氣|氣象)$|今天(天氣|氣象)|現在(天氣|氣象)|查(天氣|氣象)|(天氣|氣象)如何|(天氣|氣象)怎麼樣)/.test(text)) {
     const weather = await fetchZhongliWeather();
     return client.replyMessage({
       replyToken: event.replyToken,
