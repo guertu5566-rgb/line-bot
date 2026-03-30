@@ -37,6 +37,13 @@ function httpsGet(url) {
   });
 }
 
+// 天氣圖示對應函數
+function getWeatherIcon(weather) {
+  if (!weather) return '🌤️';
+  return weather.includes('雷') ? '⛈️' : weather.includes('雨') ? '🌧️' :
+         weather.includes('陰') ? '☁️' : weather.includes('多雲') ? '⛅' : '☀️';
+}
+
 // 取得桃園中壢天氣
 async function fetchZhongliWeather() {
   const apiKey = process.env.CWA_API_KEY;
@@ -74,9 +81,7 @@ async function fetchZhongliWeather() {
       else if (el.ElementName === '紫外線指數') uvi = values.UVIndex || uvi;
     }
 
-    // 天氣圖示對應
-    const wxIcon = wx.includes('雷') ? '⛈️' : wx.includes('雨') ? '🌧️' :
-                   wx.includes('陰') ? '☁️' : wx.includes('多雲') ? '⛅' : '☀️';
+    const wxIcon = getWeatherIcon(wx);
 
     const today = new Date().toLocaleDateString('zh-TW', {
       timeZone: 'Asia/Taipei', month: 'long', day: 'numeric', weekday: 'long'
@@ -90,6 +95,91 @@ async function fetchZhongliWeather() {
            `資料來源：中央氣象署`;
   } catch (e) {
     console.error('天氣取得失敗：', e.message);
+    return null;
+  }
+}
+
+// 取得桃園中壢一週天氣預報
+async function fetchZhongliWeatherWeekly() {
+  const apiKey = process.env.CWA_API_KEY;
+  if (!apiKey) {
+    console.error('[天氣] CWA_API_KEY 未設置');
+    return null;
+  }
+
+  try {
+    const url = `https://opendata.cwa.gov.tw/api/v1/rest/datastore/F-D0047-007?Authorization=${apiKey}&locationName=%E4%B8%AD%E5%A3%A2%E5%8D%80&elementName=Wx,MinT,MaxT,PoP12h,UVI`;
+    const data = await httpsGet(url);
+
+    const locations = data.records?.Locations?.[0]?.Location || [];
+    const location = locations.find(loc => loc.LocationName === '中壢區');
+    if (!location) {
+      console.error('[天氣] 找不到中壢區的數據');
+      return null;
+    }
+
+    // 按日期分組天氣數據
+    const dailyData = {};
+
+    for (const el of location.WeatherElement || []) {
+      if (!el.Time) continue;
+
+      for (const timeSlot of el.Time) {
+        if (!timeSlot.StartTime || !timeSlot.ElementValue?.[0]) continue;
+
+        const date = timeSlot.StartTime.substring(0, 10); // YYYY-MM-DD
+        if (!dailyData[date]) {
+          dailyData[date] = { wx: '無資料', minT: '-', maxT: '-', pop: '-', uvi: '-' };
+        }
+
+        const values = timeSlot.ElementValue[0];
+
+        if (el.ElementName === '天氣現象') dailyData[date].wx = values.Weather || dailyData[date].wx;
+        else if (el.ElementName === '最低溫度') dailyData[date].minT = values.MinTemperature || dailyData[date].minT;
+        else if (el.ElementName === '最高溫度') dailyData[date].maxT = values.MaxTemperature || dailyData[date].maxT;
+        else if (el.ElementName === '12小時降雨機率') dailyData[date].pop = values.ProbabilityOfPrecipitation || dailyData[date].pop;
+        else if (el.ElementName === '紫外線指數') dailyData[date].uvi = values.UVIndex || dailyData[date].uvi;
+      }
+    }
+
+    // 排序日期（最多7天）
+    const sortedDates = Object.keys(dailyData).sort().slice(0, 7);
+    if (sortedDates.length === 0) return null;
+
+    // 格式化輸出
+    let result = `🌤️ 桃園中壢一週天氣預報\n\n`;
+
+    // 今天詳細版
+    const todayData = dailyData[sortedDates[0]];
+    const todayDate = new Date(sortedDates[0]);
+    const todayStr = todayDate.toLocaleDateString('zh-TW', {
+      timeZone: 'Asia/Taipei', month: 'long', day: 'numeric', weekday: 'long'
+    });
+    const todayIcon = getWeatherIcon(todayData.wx);
+
+    result += `【今天】${todayStr}\n`;
+    result += `${todayIcon} ${todayData.wx}\n`;
+    result += `🌡️ ${todayData.minT}~${todayData.maxT}°C\n`;
+    result += `☔ 降雨${todayData.pop}% | ☀️ UV${todayData.uvi}\n\n`;
+
+    // 未來6天簡潔版
+    result += `【未來6天】\n`;
+    for (let i = 1; i < sortedDates.length; i++) {
+      const date = sortedDates[i];
+      const dayData = dailyData[date];
+      const dayDate = new Date(date);
+      const month = dayDate.getMonth() + 1;
+      const day = dayDate.getDate();
+      const weekday = ['日', '一', '二', '三', '四', '五', '六'][dayDate.getDay()];
+      const icon = getWeatherIcon(dayData.wx);
+
+      result += `${month}/${day}(${weekday}) ${icon} ${dayData.wx} ${dayData.minT}~${dayData.maxT}°C\n`;
+    }
+
+    result += `\n資料來源：中央氣象署`;
+    return result;
+  } catch (e) {
+    console.error('[天氣] 一週預報取得失敗：', e.message);
     return null;
   }
 }
@@ -201,12 +291,12 @@ async function handleMessage(event) {
     if (!subs.includes(userId)) {
       db.get('weatherSubscribers').push(userId).write();
     }
-    // 立即發送今日天氣預覽
-    const weather = await fetchZhongliWeather();
-    const preview = weather ? `\n\n📋 今日天氣預覽：\n${weather}` : '\n\n（請確認已設定 CWA_API_KEY 環境變數）';
+    // 立即發送一週天氣預覽
+    const weather = await fetchZhongliWeatherWeekly();
+    const preview = weather ? `\n\n📋 一週天氣預覽：\n${weather}` : '\n\n（請確認已設定 CWA_API_KEY 環境變數）';
     return client.replyMessage({
       replyToken: event.replyToken,
-      messages: [{ type: 'text', text: `✅ 已訂閱每日天氣通知！\n每天早上 6:00 會自動推播桃園中壢天氣 🌤️${preview}` }]
+      messages: [{ type: 'text', text: `✅ 已訂閱每日天氣通知！\n每天早上 6:00 會自動推播桃園中壢一週天氣預報 🌤️${preview}` }]
     });
   }
 
@@ -219,9 +309,9 @@ async function handleMessage(event) {
     });
   }
 
-  // 查詢今日天氣/氣象（即時）
+  // 查詢一週天氣/氣象（即時）
   if (/(^(天氣|氣象)$|今天(天氣|氣象)|現在(天氣|氣象)|查(天氣|氣象)|(天氣|氣象)如何|(天氣|氣象)怎麼樣)/.test(text)) {
-    const weather = await fetchZhongliWeather();
+    const weather = await fetchZhongliWeatherWeekly();
     return client.replyMessage({
       replyToken: event.replyToken,
       messages: [{ type: 'text', text: weather || '❌ 天氣資料取得失敗，請稍後再試' }]
@@ -506,15 +596,15 @@ cron.schedule('* * * * *', async () => {
   }
 });
 
-// 每天早上 6:00 台灣時間推播天氣（UTC 22:00 = 台灣 06:00）
+// 每天早上 6:00 台灣時間推播一週天氣預報（UTC 22:00 = 台灣 06:00）
 cron.schedule('0 22 * * *', async () => {
   const subscribers = db.get('weatherSubscribers').value();
   if (subscribers.length === 0) return;
 
-  console.log(`[天氣] 開始推播天氣給 ${subscribers.length} 位訂閱者`);
-  const weather = await fetchZhongliWeather();
+  console.log(`[天氣] 開始推播一週天氣給 ${subscribers.length} 位訂閱者`);
+  const weather = await fetchZhongliWeatherWeekly();
   if (!weather) {
-    console.error('[天氣] 取得天氣失敗，跳過推播');
+    console.error('[天氣] 一週天氣取得失敗，跳過推播');
     return;
   }
 
