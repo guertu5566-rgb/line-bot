@@ -1,0 +1,41 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm install:*)",
+      "Bash(powercfg /change standby-timeout-ac 0)",
+      "Bash(powercfg /change standby-timeout-dc 0)",
+      "Bash(powercfg /change monitor-timeout-ac 0)",
+      "Bash(powercfg /change monitor-timeout-dc 0)",
+      "Read(//c/Users/guert/AppData/Roaming/**)",
+      "Read(//c/ProgramData/miniconda3/**)",
+      "Read(//c/Users/guert/miniconda3/**)",
+      "Read(//c/Users/guert/anaconda3/**)",
+      "Read(//c/Users/guert/Desktop/cycling-cli/**)",
+      "Bash(python -m pip install -r requirements.txt -q)",
+      "Bash(python main.py --help)",
+      "Bash(PYTHONUTF8=1 python main.py --help)",
+      "Bash(PYTHONUTF8=1 python main.py ride add --distance 85.5 --duration 3:10 --route \"北宜公路\" --elevation 1200 --avg-power 220)",
+      "Bash(PYTHONUTF8=1 python main.py ride add --distance 42.0 --duration 1:30 --route \"河濱公園\")",
+      "Bash(PYTHONUTF8=1 python main.py ride list)",
+      "Bash(PYTHONUTF8=1 python main.py ride add --distance 85.5 --duration 3:10 --route \"北宜公路\" --elevation 1200 --power 220)",
+      "Bash(PYTHONUTF8=1 python main.py ride stats)",
+      "Bash(PYTHONUTF8=1 python main.py gear add --name \"Specialized Tarmac SL7\" --type \"整車\" --brand \"Specialized\" --price 150000 --date 2025-01-15)",
+      "Bash(PYTHONUTF8=1 python main.py gear list)",
+      "Bash(PYTHONUTF8=1 python main.py train ftp --power 280)",
+      "Bash(cmd.exe /c \"cycling.bat ride stats\")",
+      "Bash(PYTHONUTF8=1 python main.py ride --help)",
+      "Bash(python -m pip install garminconnect -q)",
+      "Bash(PYTHONUTF8=1 python main.py sync --help)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(PYTHONUTF8=1 python main.py sync pull --dry-run)",
+      "Bash(PYTHONUTF8=1 python main.py ride list --limit 50)",
+      "Bash(curl -s \"https://opendata.cwa.gov.tw/api/v1/rest/datastore/F-D0047-007?Authorization=CWA-D027B243-0AEE-40B8-BD1C-8F8A1CD5008E&locationName=%E4%B8%AD%E5%A3%A2%E5%8D%80&elementName=Wx,MinT,MaxT,PoP12h,UVI\")",
+      "Bash(jq .records.Locations[0].Location[1])",
+      "Bash(python3:*)",
+      "Bash(curl -s \"https://opendata.cwa.gov.tw/api/v1/rest/datastore/F-D0047-091?Authorization=CWA-D027B243-0AEE-40B8-BD1C-8F8A1CD5008E&locationName=%E4%B8%AD%E5%A3%A2%E5%8D%80\")",
+      "Bash(powercfg /change standby-timeout-dc 15)",
+      "Bash(start ms-settings:powersleep)"
+    ]
+  }
+}

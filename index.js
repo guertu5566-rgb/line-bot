@@ -60,18 +60,18 @@ async function fetchZhongliWeather() {
       return null;
     }
 
-    // 提取所需的數據（按照值類型而不是字段名）
+    // 提取所需的數據（根據 ElementName 分類）
     let wx = '無資料', minT = '-', maxT = '-', pop = '-', uvi = '-';
 
     for (const el of location.WeatherElement || []) {
       if (!el.Time || !el.Time[0]) continue;
       const values = el.Time[0].ElementValue?.[0] || {};
 
-      if (values.Weather) wx = values.Weather;
-      if (values.MinTemperature) minT = values.MinTemperature;
-      if (values.MaxTemperature) maxT = values.MaxTemperature;
-      if (values.ProbabilityOfPrecipitation) pop = values.ProbabilityOfPrecipitation;
-      if (values.UVIndex) uvi = values.UVIndex;
+      if (el.ElementName === '天氣現象') wx = values.Weather || wx;
+      else if (el.ElementName === '最低溫度') minT = values.MinTemperature || minT;
+      else if (el.ElementName === '最高溫度') maxT = values.MaxTemperature || maxT;
+      else if (el.ElementName === '12小時降雨機率') pop = values.ProbabilityOfPrecipitation || pop;
+      else if (el.ElementName === '紫外線指數') uvi = values.UVIndex || uvi;
     }
 
     // 天氣圖示對應
