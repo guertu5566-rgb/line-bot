@@ -35,7 +35,9 @@
       "Bash(python3:*)",
       "Bash(curl -s \"https://opendata.cwa.gov.tw/api/v1/rest/datastore/F-D0047-091?Authorization=CWA-D027B243-0AEE-40B8-BD1C-8F8A1CD5008E&locationName=%E4%B8%AD%E5%A3%A2%E5%8D%80\")",
       "Bash(powercfg /change standby-timeout-dc 15)",
-      "Bash(start ms-settings:powersleep)"
+      "Bash(start ms-settings:powersleep)",
+      "Bash(timeout 5 node index.js)",
+      "Bash(git push:*)"
     ]
   }
 }

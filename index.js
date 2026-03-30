@@ -20,8 +20,8 @@ const lineConfig = {
 };
 const client = new line.messagingApi.MessagingApiClient(lineConfig);
 
-// Groq AI 初始化
-const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+// Groq AI 初始化（可選）
+const groq = process.env.GROQ_API_KEY ? new Groq({ apiKey: process.env.GROQ_API_KEY }) : null;
 
 // HTTP GET 工具函數
 function httpsGet(url) {
@@ -242,7 +242,7 @@ async function handleMessage(event) {
 
   let parsed = null;
 
-  if (process.env.GROQ_API_KEY) {
+  if (groq) {
     try {
       parsed = await parseWithGroq(text);
     } catch (e) {
