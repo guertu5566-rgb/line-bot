@@ -185,11 +185,13 @@ async function fetchZhongliWeatherWeekly() {
 }
 
 // Google OAuth2 初始化
-function getOAuth2Client() {
+function getOAuth2Client(redirectUri) {
+  // 優先使用環境變數，其次使用傳入的URI，最後使用預設值
+  const finalRedirectUri = process.env.GOOGLE_REDIRECT_URI || redirectUri || `https://line-bot-secretary.onrender.com/oauth/google/callback`;
   return new google.auth.OAuth2(
     process.env.GOOGLE_CLIENT_ID,
     process.env.GOOGLE_CLIENT_SECRET,
-    process.env.GOOGLE_REDIRECT_URI || `https://line-bot-secretary.onrender.com/oauth/google/callback`
+    finalRedirectUri
   );
 }
 
@@ -198,7 +200,13 @@ app.get('/oauth/google', (req, res) => {
   const userId = req.query.userId;
   if (!userId) return res.status(400).send('Missing userId');
 
-  const oauth2Client = getOAuth2Client();
+  // 動態構建重定向URI（使用實際的請求host）
+  const protocol = req.headers['x-forwarded-proto'] || req.protocol;
+  const host = req.headers['x-forwarded-host'] || req.get('host');
+  const redirectUri = `${protocol}://${host}/oauth/google/callback`;
+
+  console.log('[Google OAuth] 使用重定向URI:', redirectUri);
+  const oauth2Client = getOAuth2Client(redirectUri);
   const url = oauth2Client.generateAuthUrl({
     access_type: 'offline',
     scope: ['https://www.googleapis.com/auth/calendar.events'],
@@ -214,7 +222,13 @@ app.get('/oauth/google/callback', async (req, res) => {
   if (!code || !userId) return res.status(400).send('Missing code or userId');
 
   try {
-    const oauth2Client = getOAuth2Client();
+    // 動態構建重定向URI（必須與授權請求中的相同）
+    const protocol = req.headers['x-forwarded-proto'] || req.protocol;
+    const host = req.headers['x-forwarded-host'] || req.get('host');
+    const redirectUri = `${protocol}://${host}/oauth/google/callback`;
+
+    console.log('[Google OAuth] Callback - 使用重定向URI:', redirectUri);
+    const oauth2Client = getOAuth2Client(redirectUri);
     const { tokens } = await oauth2Client.getToken(code);
     db.get('googleTokens').assign({ [userId]: tokens }).write();
     res.send(`
@@ -320,7 +334,10 @@ async function handleMessage(event) {
 
   // 綁定 Google 日曆指令
   if (/綁定.*google|連結.*google|google.*日曆|授權.*日曆|link.*google/i.test(text)) {
-    const authUrl = `https://line-bot-secretary.onrender.com/oauth/google?userId=${userId}`;
+    // 使用環境變數中設定的基礎URL，或預設值
+    const baseUrl = process.env.BOT_BASE_URL || `https://line-bot-secretary.onrender.com`;
+    const authUrl = `${baseUrl}/oauth/google?userId=${userId}`;
+    console.log('[Google OAuth] 發送授權連結:', authUrl);
     return client.replyMessage({
       replyToken: event.replyToken,
       messages: [{
