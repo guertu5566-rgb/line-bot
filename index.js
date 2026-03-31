@@ -699,5 +699,33 @@ cron.schedule('0 22 * * *', async () => {
 
 app.get('/', (req, res) => res.send('LINE Bot Secretary is running! 🤖'));
 
+// 外部 cron 觸發端點：每天早上 6 點由 cron-job.org 呼叫
+app.get('/cron/weather', async (req, res) => {
+  const secret = req.query.secret;
+  if (secret !== (process.env.CRON_SECRET || 'weather2024')) {
+    return res.status(401).send('Unauthorized');
+  }
+  const subscribers = db.get('weatherSubscribers').value();
+  if (subscribers.length === 0) {
+    return res.send('No subscribers');
+  }
+  console.log(`[天氣] 外部 cron 觸發，推播給 ${subscribers.length} 位訂閱者`);
+  const weather = await fetchZhongliWeatherWeekly();
+  if (!weather) {
+    console.error('[天氣] 天氣取得失敗');
+    return res.status(500).send('Weather fetch failed');
+  }
+  let ok = 0;
+  for (const userId of subscribers) {
+    try {
+      await client.pushMessage({ to: userId, messages: [{ type: 'text', text: weather }] });
+      ok++;
+    } catch (e) {
+      console.error(`[天氣] 推播失敗 (${userId})：`, e.message);
+    }
+  }
+  res.send(`✅ 天氣推播完成，成功 ${ok}/${subscribers.length}`);
+});
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
