@@ -200,20 +200,63 @@ app.get('/oauth/google', (req, res) => {
   const userId = req.query.userId;
   if (!userId) return res.status(400).send('Missing userId');
 
-  // 動態構建重定向URI（使用實際的請求host）
   const protocol = req.headers['x-forwarded-proto'] || req.protocol;
   const host = req.headers['x-forwarded-host'] || req.get('host');
   const redirectUri = `${protocol}://${host}/oauth/google/callback`;
 
   console.log('[Google OAuth] 使用重定向URI:', redirectUri);
   const oauth2Client = getOAuth2Client(redirectUri);
-  const url = oauth2Client.generateAuthUrl({
+  const googleUrl = oauth2Client.generateAuthUrl({
     access_type: 'offline',
     scope: ['https://www.googleapis.com/auth/calendar'],
     state: userId,
     prompt: 'consent'
   });
-  res.redirect(url);
+
+  // 回傳中間頁面，引導使用者在外部瀏覽器開啟（避免 LINE WebView 被 Google 封鎖）
+  res.send(`<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>授權 Google 日曆</title>
+  <style>
+    body { font-family: sans-serif; text-align: center; padding: 40px 20px; background: #f5f5f5; }
+    .card { background: white; border-radius: 16px; padding: 32px 24px; max-width: 400px; margin: 0 auto; box-shadow: 0 2px 12px rgba(0,0,0,0.1); }
+    h2 { color: #333; margin-bottom: 8px; }
+    p { color: #666; font-size: 14px; line-height: 1.6; }
+    .btn { display: block; background: #4285F4; color: white; text-decoration: none; padding: 14px 24px; border-radius: 8px; font-size: 16px; font-weight: bold; margin: 24px auto; }
+    .warning { background: #fff3cd; border: 1px solid #ffc107; border-radius: 8px; padding: 12px; font-size: 13px; color: #856404; margin-top: 16px; }
+    .url-box { background: #f0f0f0; border-radius: 8px; padding: 10px; font-size: 11px; word-break: break-all; color: #555; margin-top: 16px; text-align: left; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h2>📅 授權 Google 日曆</h2>
+    <p>請點下方按鈕，在外部瀏覽器（Chrome / Safari）中完成 Google 授權</p>
+    <a class="btn" href="${googleUrl}" target="_blank" rel="noopener">點此開啟 Google 授權</a>
+    <div class="warning">
+      ⚠️ 若點擊後仍在 LINE 瀏覽器內，請長按按鈕選擇「以瀏覽器開啟」
+    </div>
+    <div class="url-box">
+      或複製此網址到 Chrome / Safari 開啟：<br><br>
+      ${googleUrl}
+    </div>
+  </div>
+  <script>
+    // 嘗試自動在外部瀏覽器開啟
+    var ua = navigator.userAgent;
+    if (ua.indexOf('Line/') > -1 || ua.indexOf('KAKAOTALK') > -1) {
+      // 在 LINE WebView 中，嘗試用 intent 跳出（Android）
+      var url = "${googleUrl}";
+      if (ua.indexOf('Android') > -1) {
+        var intent = "intent:" + url.replace(/^https?:/, '') + "#Intent;scheme=https;package=com.android.chrome;end";
+        window.location.href = intent;
+      }
+    }
+  </script>
+</body>
+</html>`);
 });
 
 // Google OAuth2 回調
