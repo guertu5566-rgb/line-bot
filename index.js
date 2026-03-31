@@ -230,18 +230,33 @@ app.get('/oauth/google/callback', async (req, res) => {
     console.log('[Google OAuth] Callback - 使用重定向URI:', redirectUri);
     const oauth2Client = getOAuth2Client(redirectUri);
     const { tokens } = await oauth2Client.getToken(code);
-    db.get('googleTokens').assign({ [userId]: tokens }).write();
+    oauth2Client.setCredentials(tokens);
+
+    // 尋找「柏程行事曆」
+    const calApi = google.calendar({ version: 'v3', auth: oauth2Client });
+    const calList = await calApi.calendarList.list();
+    const TARGET_CAL = '柏程行事曆';
+    let calendarId = 'primary';
+    const found = (calList.data.items || []).find(c => c.summary === TARGET_CAL);
+    if (found) {
+      calendarId = found.id;
+      console.log(`[Google OAuth] 找到「${TARGET_CAL}」ID:`, calendarId);
+    } else {
+      console.log(`[Google OAuth] 找不到「${TARGET_CAL}」，使用 primary`);
+    }
+
+    db.get('googleTokens').assign({ [userId]: { ...tokens, calendarId } }).write();
     res.send(`
       <html><body style="font-family:sans-serif;text-align:center;padding:50px">
         <h2>✅ Google 日曆綁定成功！</h2>
-        <p>您的 LINE 提醒小秘書現在會自動把提醒加入 Google 日曆</p>
+        <p>您的 LINE 提醒小秘書現在會自動把提醒加入「${found ? TARGET_CAL : '主要行事曆'}」</p>
         <p>可以關閉此視窗了</p>
       </body></html>
     `);
     // 通知 LINE 用戶綁定成功
     await client.pushMessage({
       to: userId,
-      messages: [{ type: 'text', text: '✅ Google 日曆綁定成功！\n\n以後設定提醒時，我也會自動幫您加入 Google 日曆 📅' }]
+      messages: [{ type: 'text', text: `✅ Google 日曆綁定成功！\n\n以後設定提醒時，我也會自動幫您加入「${found ? TARGET_CAL : '主要行事曆'}」📅` }]
     });
   } catch (e) {
     console.error('Google OAuth callback error:', e.message);
@@ -266,9 +281,11 @@ async function addToGoogleCalendar(userId, summary, startTime) {
 
     const calendar = google.calendar({ version: 'v3', auth: oauth2Client });
     const endTime = new Date(startTime.getTime() + 30 * 60000); // 預設30分鐘
+    const calendarId = tokens.calendarId || 'primary';
+    console.log(`[Google Calendar] 寫入行事曆 ID: ${calendarId}`);
 
     await calendar.events.insert({
-      calendarId: 'primary',
+      calendarId,
       resource: {
         summary: summary,
         start: { dateTime: startTime.toISOString(), timeZone: 'Asia/Taipei' },
