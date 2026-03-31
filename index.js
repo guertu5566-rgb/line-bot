@@ -209,7 +209,7 @@ app.get('/oauth/google', (req, res) => {
   const oauth2Client = getOAuth2Client(redirectUri);
   const url = oauth2Client.generateAuthUrl({
     access_type: 'offline',
-    scope: ['https://www.googleapis.com/auth/calendar.events'],
+    scope: ['https://www.googleapis.com/auth/calendar'],
     state: userId,
     prompt: 'consent'
   });
