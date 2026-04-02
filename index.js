@@ -87,7 +87,8 @@ async function fetchZhongliWeather() {
       timeZone: 'Asia/Taipei', month: 'long', day: 'numeric', weekday: 'long'
     });
 
-    return `🌤️ 桃園中壢今日天氣\n${today}\n\n` +
+    return `🌤️ 中壢區今日天氣\n${today}\n\n` +
+           `📍 地點：中壢區\n` +
            `${wxIcon} 天氣：${wx}\n` +
            `🌡️ 氣溫：${minT}°C ～ ${maxT}°C\n` +
            `☔ 降雨機率：${pop}%\n` +
@@ -147,7 +148,8 @@ async function fetchZhongliWeatherWeekly() {
     if (sortedDates.length === 0) return null;
 
     // 格式化輸出
-    let result = `🌤️ 桃園中壢一週天氣預報\n\n`;
+    let result = `🌤️ 中壢區一週天氣預報\n`;
+    result += `📍 地點：中壢區\n\n`;
 
     // 今天詳細版
     const todayData = dailyData[sortedDates[0]];
@@ -159,11 +161,12 @@ async function fetchZhongliWeatherWeekly() {
 
     result += `【今天】${todayStr}\n`;
     result += `${todayIcon} ${todayData.wx}\n`;
-    result += `🌡️ ${todayData.minT}~${todayData.maxT}°C\n`;
-    result += `☔ 降雨${todayData.pop}% | ☀️ UV${todayData.uvi}\n\n`;
+    result += `🌡️ 氣溫：${todayData.minT}~${todayData.maxT}°C\n`;
+    result += `☔ 降雨機率：${todayData.pop}%\n`;
+    result += `☀️ 紫外線：${todayData.uvi}\n\n`;
 
     // 未來6天簡潔版
-    result += `【未來6天】\n`;
+    result += `【未來6天降雨機率】\n`;
     for (let i = 1; i < sortedDates.length; i++) {
       const date = sortedDates[i];
       const dayData = dailyData[date];
@@ -173,7 +176,7 @@ async function fetchZhongliWeatherWeekly() {
       const weekday = ['日', '一', '二', '三', '四', '五', '六'][dayDate.getDay()];
       const icon = getWeatherIcon(dayData.wx);
 
-      result += `${month}/${day}(${weekday}) ${icon} ${dayData.wx} ${dayData.minT}~${dayData.maxT}°C\n`;
+      result += `${month}/${day}(${weekday}) ${icon} ${dayData.wx} ${dayData.minT}~${dayData.maxT}°C ☔${dayData.pop}%\n`;
     }
 
     result += `\n資料來源：中央氣象署`;
