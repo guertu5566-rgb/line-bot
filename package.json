@@ -15,7 +15,7 @@
     "express": "^4.18.2",
     "googleapis": "^171.4.0",
     "groq-sdk": "^0.9.0",
-    "lowdb": "^1.0.0",
+    "mongodb": "^6.0.0",
     "node-cron": "^3.0.3"
   }
 }
