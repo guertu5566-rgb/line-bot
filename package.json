@@ -1,10 +1,16 @@
 {
   "name": "line-bot-secretary",
   "version": "1.0.0",
+  "description": "LINE 提醒小秘書 - 天氣 + 行事曆 + Google Calendar",
   "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
   "dependencies": {
     "@line/bot-sdk": "^9.0.0",
-    "chrono-node": "^2.7.5",
     "dotenv": "^16.4.1",
     "express": "^4.18.2",
     "googleapis": "^171.4.0",

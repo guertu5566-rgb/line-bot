@@ -44,60 +44,13 @@ function getWeatherIcon(weather) {
          weather.includes('陰') ? '☁️' : weather.includes('多雲') ? '⛅' : '☀️';
 }
 
-// 取得桃園中壢天氣
-async function fetchZhongliWeather() {
-  const apiKey = process.env.CWA_API_KEY;
-  if (!apiKey) {
-    console.error('[天氣] CWA_API_KEY 未設置');
-    return null;
-  }
-
-  try {
-    // 中央氣象署 F-D0047-007：桃園市鄉鎮天氣預報（含中壢區）
-    const url = `https://opendata.cwa.gov.tw/api/v1/rest/datastore/F-D0047-007?Authorization=${apiKey}&locationName=%E4%B8%AD%E5%A3%A2%E5%8D%80&elementName=Wx,MinT,MaxT,PoP12h,UVI`;
-    console.log('[天氣] 正在取得天氣資料...');
-    const data = await httpsGet(url);
-    console.log('[天氣] API 回應:', JSON.stringify(data).substring(0, 200));
-
-    // 找出「中壢區」的數據
-    const locations = data.records?.Locations?.[0]?.Location || [];
-    const location = locations.find(loc => loc.LocationName === '中壢區');
-    if (!location) {
-      console.error('[天氣] 找不到中壢區的數據');
-      return null;
-    }
-
-    // 提取所需的數據（根據 ElementName 分類）
-    let wx = '無資料', minT = '-', maxT = '-', pop = '-', uvi = '-';
-
-    for (const el of location.WeatherElement || []) {
-      if (!el.Time || !el.Time[0]) continue;
-      const values = el.Time[0].ElementValue?.[0] || {};
-
-      if (el.ElementName === '天氣現象') wx = values.Weather || wx;
-      else if (el.ElementName === '最低溫度') minT = values.MinTemperature || minT;
-      else if (el.ElementName === '最高溫度') maxT = values.MaxTemperature || maxT;
-      else if (el.ElementName === '12小時降雨機率') pop = values.ProbabilityOfPrecipitation || pop;
-      else if (el.ElementName === '紫外線指數') uvi = values.UVIndex || uvi;
-    }
-
-    const wxIcon = getWeatherIcon(wx);
-
-    const today = new Date().toLocaleDateString('zh-TW', {
-      timeZone: 'Asia/Taipei', month: 'long', day: 'numeric', weekday: 'long'
-    });
-
-    return `🌤️ 中壢區今日天氣\n${today}\n\n` +
-           `📍 地點：中壢區\n` +
-           `${wxIcon} 天氣：${wx}\n` +
-           `🌡️ 氣溫：${minT}°C ～ ${maxT}°C\n` +
-           `☔ 降雨機率：${pop}%\n` +
-           `☀️ 紫外線：${uvi}\n\n` +
-           `資料來源：中央氣象署`;
-  } catch (e) {
-    console.error('天氣取得失敗：', e.message);
-    return null;
-  }
+// 取得天氣訂閱者清單（DB + 環境變數備援，防止 Render 重啟清空）
+function getWeatherSubscribers() {
+  const dbSubs = db.get('weatherSubscribers').value() || [];
+  const envSubs = process.env.WEATHER_SUBSCRIBERS
+    ? process.env.WEATHER_SUBSCRIBERS.split(',').map(s => s.trim()).filter(Boolean)
+    : [];
+  return [...new Set([...dbSubs, ...envSubs])];
 }
 
 // 取得桃園中壢一週天氣預報
@@ -367,6 +320,7 @@ async function handleMessage(event) {
     const subs = db.get('weatherSubscribers').value();
     if (!subs.includes(userId)) {
       db.get('weatherSubscribers').push(userId).write();
+      console.log(`[天氣] 新訂閱者: ${userId}`);
     }
     // 立即發送一週天氣預覽
     const weather = await fetchZhongliWeatherWeekly();
@@ -676,28 +630,42 @@ cron.schedule('* * * * *', async () => {
   }
 });
 
-// 每天早上 6:00 台灣時間推播一週天氣預報（UTC 22:00 = 台灣 06:00）
-cron.schedule('0 22 * * *', async () => {
-  const subscribers = db.get('weatherSubscribers').value();
-  if (subscribers.length === 0) return;
+// 天氣推播核心函數（供內部 cron 和外部 /cron/weather 共用）
+async function pushWeatherToSubscribers() {
+  const subscribers = getWeatherSubscribers();
+  if (subscribers.length === 0) {
+    console.log('[天氣] 無訂閱者，跳過推播');
+    return { ok: 0, total: 0 };
+  }
 
   console.log(`[天氣] 開始推播一週天氣給 ${subscribers.length} 位訂閱者`);
   const weather = await fetchZhongliWeatherWeekly();
   if (!weather) {
     console.error('[天氣] 一週天氣取得失敗，跳過推播');
-    return;
+    return { ok: 0, total: subscribers.length, error: 'weather_fetch_failed' };
   }
 
-  for (const userId of subscribers) {
+  let ok = 0;
+  for (const uid of subscribers) {
     try {
-      await client.pushMessage({
-        to: userId,
-        messages: [{ type: 'text', text: weather }]
-      });
+      await client.pushMessage({ to: uid, messages: [{ type: 'text', text: weather }] });
+      ok++;
     } catch (e) {
-      console.error(`[天氣] 推播失敗 (${userId})：`, e.message);
+      console.error(`[天氣] 推播失敗 (${uid})：`, e.message);
+      // 若是用戶封鎖 bot，自動從訂閱清單移除
+      if (e.message?.includes('Invalid reply token') || e.statusCode === 400 || e.statusCode === 403) {
+        db.get('weatherSubscribers').remove(id => id === uid).write();
+        console.log(`[天氣] 已自動移除封鎖訂閱者: ${uid}`);
+      }
     }
   }
+  return { ok, total: subscribers.length };
+}
+
+// 每天早上 6:00 台灣時間推播一週天氣預報（UTC 22:00 = 台灣 06:00）
+cron.schedule('0 22 * * *', async () => {
+  const result = await pushWeatherToSubscribers();
+  console.log(`[天氣] cron 推播完成：${result.ok}/${result.total}`);
 });
 
 app.get('/', (req, res) => res.send('LINE Bot Secretary is running! 🤖'));
@@ -708,26 +676,12 @@ app.get('/cron/weather', async (req, res) => {
   if (secret !== (process.env.CRON_SECRET || 'weather2024')) {
     return res.status(401).send('Unauthorized');
   }
-  const subscribers = db.get('weatherSubscribers').value();
-  if (subscribers.length === 0) {
-    return res.send('No subscribers');
+  console.log('[天氣] 外部 cron 觸發');
+  const result = await pushWeatherToSubscribers();
+  if (result.error) {
+    return res.status(500).send(`天氣取得失敗：${result.error}`);
   }
-  console.log(`[天氣] 外部 cron 觸發，推播給 ${subscribers.length} 位訂閱者`);
-  const weather = await fetchZhongliWeatherWeekly();
-  if (!weather) {
-    console.error('[天氣] 天氣取得失敗');
-    return res.status(500).send('Weather fetch failed');
-  }
-  let ok = 0;
-  for (const userId of subscribers) {
-    try {
-      await client.pushMessage({ to: userId, messages: [{ type: 'text', text: weather }] });
-      ok++;
-    } catch (e) {
-      console.error(`[天氣] 推播失敗 (${userId})：`, e.message);
-    }
-  }
-  res.send(`✅ 天氣推播完成，成功 ${ok}/${subscribers.length}`);
+  res.send(`✅ 天氣推播完成，成功 ${result.ok}/${result.total}`);
 });
 
 const PORT = process.env.PORT || 3000;
