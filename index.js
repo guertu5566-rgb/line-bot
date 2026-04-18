@@ -349,6 +349,14 @@ async function handleMessage(event) {
     });
   }
 
+  // 查詢自己的 LINE userId（設定環境變數用）
+  if (/我的id|我的ID|myid|userid|我的用戶id/i.test(text)) {
+    return client.replyMessage({
+      replyToken: event.replyToken,
+      messages: [{ type: 'text', text: `🆔 你的 LINE User ID：\n\n${userId}\n\n請複製此 ID 並到 Render 環境變數設定 WEATHER_SUBSCRIBERS` }]
+    });
+  }
+
   // 綁定 Google 日曆指令
   if (/綁定.*google|連結.*google|google.*日曆|授權.*日曆|link.*google/i.test(text)) {
     // 使用環境變數中設定的基礎URL，或預設值
