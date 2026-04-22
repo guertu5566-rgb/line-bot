@@ -551,10 +551,7 @@ async function pushWeatherToSubscribers() {
   return { ok, total: subscribers.length };
 }
 
-cron.schedule('0 22 * * *', async () => {
-  const result = await pushWeatherToSubscribers();
-  console.log(`[天氣] cron 推播完成：${result.ok}/${result.total}`);
-});
+// 天氣推播改由 GitHub Actions 外部觸發 /cron/weather，不使用內部 cron 避免重複推播
 
 // ─── HTTP 端點 ───────────────────────────────────────────────
 app.get('/', (req, res) => res.send('LINE Bot Secretary is running! 🤖'));
