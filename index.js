@@ -530,6 +530,24 @@ cron.schedule('* * * * *', async () => {
 
 // ─── 天氣推播 ────────────────────────────────────────────────
 async function pushWeatherToSubscribers() {
+  // 防止重複推播：同一天只推一次（以 Asia/Taipei 日期判斷）
+  try {
+    const db = await getDB();
+    const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Taipei' }); // 'YYYY-MM-DD'
+    const lastPush = await db.collection('settings').findOne({ key: 'lastWeatherPushDate' });
+    if (lastPush && lastPush.value === today) {
+      console.log(`[天氣] 今天(${today})已推播過，跳過`);
+      return { ok: 0, total: 0, skipped: true };
+    }
+    await db.collection('settings').updateOne(
+      { key: 'lastWeatherPushDate' },
+      { $set: { value: today } },
+      { upsert: true }
+    );
+  } catch (e) {
+    console.error('[天氣] 防重複推播檢查失敗，繼續推播：', e.message);
+  }
+
   const subscribers = await getWeatherSubscribers();
   if (subscribers.length === 0) { console.log('[天氣] 無訂閱者，跳過推播'); return { ok: 0, total: 0 }; }
   console.log(`[天氣] 開始推播一週天氣給 ${subscribers.length} 位訂閱者`);
