@@ -288,28 +288,62 @@ app.get('/oauth/google/callback', async (req, res) => {
 
 async function addToGoogleCalendar(userId, summary, startTime) {
   const tokens = await dbGetGoogleTokens(userId);
-  if (!tokens) return false;
+  if (!tokens || !tokens.refresh_token) {
+    console.error(`[Google] userId=${userId} 缺少 tokens 或 refresh_token，需重新綁定`);
+    return 'no_token';
+  }
   try {
     const oauth2Client = getOAuth2Client();
     oauth2Client.setCredentials(tokens);
+
+    // 當 access_token 自動刷新時，存回 MongoDB
     oauth2Client.on('tokens', async (newTokens) => {
+      console.log('[Google] Token 自動刷新，更新儲存');
       await dbSaveGoogleTokens(userId, { ...tokens, ...newTokens });
     });
+
     const calendar = google.calendar({ version: 'v3', auth: oauth2Client });
     const endTime = new Date(startTime.getTime() + 30 * 60000);
     const calendarId = tokens.calendarId || 'primary';
-    await calendar.events.insert({
-      calendarId,
-      resource: {
-        summary,
-        start: { dateTime: startTime.toISOString(), timeZone: 'Asia/Taipei' },
-        end: { dateTime: endTime.toISOString(), timeZone: 'Asia/Taipei' },
-        reminders: { useDefault: false, overrides: [{ method: 'popup', minutes: 10 }] }
+
+    // 優先用指定行事曆，失敗就 fallback 到 primary
+    try {
+      await calendar.events.insert({
+        calendarId,
+        resource: {
+          summary,
+          start: { dateTime: startTime.toISOString(), timeZone: 'Asia/Taipei' },
+          end: { dateTime: endTime.toISOString(), timeZone: 'Asia/Taipei' },
+          reminders: { useDefault: false, overrides: [{ method: 'popup', minutes: 10 }] }
+        }
+      });
+    } catch (calErr) {
+      if (calendarId !== 'primary') {
+        console.warn(`[Google] 指定行事曆失敗，改用 primary：${calErr.message}`);
+        await calendar.events.insert({
+          calendarId: 'primary',
+          resource: {
+            summary,
+            start: { dateTime: startTime.toISOString(), timeZone: 'Asia/Taipei' },
+            end: { dateTime: endTime.toISOString(), timeZone: 'Asia/Taipei' },
+            reminders: { useDefault: false, overrides: [{ method: 'popup', minutes: 10 }] }
+          }
+        });
+      } else {
+        throw calErr;
       }
-    });
+    }
+    console.log(`[Google] ✅ 成功新增：${summary}`);
     return true;
   } catch (e) {
-    console.error('Google Calendar 新增失敗：', e.message);
+    const msg = e.message || '';
+    console.error(`[Google] Calendar 新增失敗 (${e.code || e.status})：${msg}`);
+    // Token 失效：通知使用者重新綁定
+    if (e.code === 401 || msg.includes('invalid_grant') || msg.includes('Token has been expired')) {
+      console.error('[Google] Token 已失效，清除舊 token');
+      await dbSaveGoogleTokens(userId, { _invalid: true });
+      return 'token_expired';
+    }
     return false;
   }
 }
@@ -449,9 +483,15 @@ async function saveReminder(userId, content, eventAt, replyToken) {
 
   const tokens = await dbGetGoogleTokens(userId);
   let calendarMsg = '';
-  if (tokens) {
-    const added = await addToGoogleCalendar(userId, content, eventAt);
-    calendarMsg = added ? '\n📅 已同步加入 Google 日曆' : '';
+  if (tokens && !tokens._invalid) {
+    const result = await addToGoogleCalendar(userId, content, eventAt);
+    if (result === true) {
+      calendarMsg = '\n📅 已同步加入 Google 日曆';
+    } else if (result === 'token_expired' || result === 'no_token') {
+      calendarMsg = '\n⚠️ Google 日曆授權已失效，請傳「綁定Google日曆」重新授權';
+    } else {
+      calendarMsg = '\n❌ Google 日曆同步失敗（請稍後再試）';
+    }
   }
 
   const reminderLines = addedReminders.length > 0
