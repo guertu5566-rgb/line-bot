@@ -93,7 +93,10 @@ async function dbSaveGoogleTokens(userId, tokens) {
   const db = await getDB();
   await db.collection('googleTokens').updateOne(
     { userId },
-    { $set: { userId, ...tokens } },
+    {
+      $set: { userId, ...tokens },
+      $unset: { _invalid: '' }   // 清除失效旗標
+    },
     { upsert: true }
   );
 }
