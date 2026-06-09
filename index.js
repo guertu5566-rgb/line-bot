@@ -429,7 +429,7 @@ async function parseWithGemini(text) {
     timeZone: 'Asia/Taipei', year: 'numeric', month: '2-digit', day: '2-digit',
     hour: '2-digit', minute: '2-digit', weekday: 'long'
   });
-  const model = genai.getGenerativeModel({ model: 'gemini-2.0-flash' });
+  const model = genai.getGenerativeModel({ model: 'gemini-2.5-flash' });
   const prompt = `你是LINE提醒機器人的語意解析器。現在台灣時間：${nowStr}
 回傳純JSON（不要markdown代碼塊）：
 {"intent":"set_reminder|list_reminders|delete_reminder|unknown","content":"提醒內容（去掉時間詞和觸發詞）","datetime":"ISO8601台灣時間或null","deleteId":數字或null}
