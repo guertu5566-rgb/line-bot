@@ -2,7 +2,7 @@ require('dotenv').config();
 const express = require('express');
 const line = require('@line/bot-sdk');
 const cron = require('node-cron');
-const Groq = require('groq-sdk');
+const { GoogleGenerativeAI } = require('@google/generative-ai');
 const { MongoClient } = require('mongodb');
 const { google } = require('googleapis');
 const https = require('https');
@@ -127,7 +127,7 @@ const lineConfig = {
 };
 const client = new line.messagingApi.MessagingApiClient(lineConfig);
 
-const groq = process.env.GROQ_API_KEY ? new Groq({ apiKey: process.env.GROQ_API_KEY }) : null;
+const genai = process.env.GEMINI_API_KEY ? new GoogleGenerativeAI(process.env.GEMINI_API_KEY) : null;
 
 // ─── HTTP GET 工具 ───────────────────────────────────────────
 function httpsGet(url) {
@@ -405,9 +405,9 @@ async function handleMessage(event) {
   }
 
   let parsed = null;
-  if (groq) {
-    try { parsed = await parseWithGroq(text); }
-    catch (e) { console.error('Groq 解析失敗，改用關鍵字：', e.message); }
+  if (genai) {
+    try { parsed = await parseWithGemini(text); }
+    catch (e) { console.error('Gemini 解析失敗，改用關鍵字：', e.message); }
   }
   if (!parsed) parsed = parseByKeyword(text);
   if (!parsed) return sendHelp(event.replyToken);
@@ -424,20 +424,20 @@ async function handleMessage(event) {
   }
 }
 
-async function parseWithGroq(text) {
+async function parseWithGemini(text) {
   const nowStr = new Date().toLocaleString('zh-TW', {
     timeZone: 'Asia/Taipei', year: 'numeric', month: '2-digit', day: '2-digit',
     hour: '2-digit', minute: '2-digit', weekday: 'long'
   });
-  const completion = await groq.chat.completions.create({
-    model: 'llama-3.3-70b-versatile',
-    messages: [
-      { role: 'system', content: `你是LINE提醒機器人的語意解析器。現在台灣時間：${nowStr}\n回傳純JSON（不要markdown代碼塊）：\n{"intent":"set_reminder|list_reminders|delete_reminder|unknown","content":"提醒內容（去掉時間詞和觸發詞）","datetime":"ISO8601台灣時間或null","deleteId":數字或null}\n規則：1.含提醒我/幫我記得/別忘了/X點/明天/後天/下週/小時後→set_reminder 2.含提醒列表/查看提醒→list_reminders 3.含刪除/取消+數字→delete_reminder 4.其他→unknown 5.datetime必須是未來時間 6.只有時段沒有具體時間：早上預設09:00，下午預設14:00，晚上預設20:00` },
-      { role: 'user', content: text }
-    ],
-    temperature: 0.1, max_tokens: 200
-  });
-  const raw = completion.choices[0].message.content.trim().replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+  const model = genai.getGenerativeModel({ model: 'gemini-1.5-flash' });
+  const prompt = `你是LINE提醒機器人的語意解析器。現在台灣時間：${nowStr}
+回傳純JSON（不要markdown代碼塊）：
+{"intent":"set_reminder|list_reminders|delete_reminder|unknown","content":"提醒內容（去掉時間詞和觸發詞）","datetime":"ISO8601台灣時間或null","deleteId":數字或null}
+規則：1.含提醒我/幫我記得/別忘了/X點/明天/後天/下週/小時後→set_reminder 2.含提醒列表/查看提醒→list_reminders 3.含刪除/取消+數字→delete_reminder 4.其他→unknown 5.datetime必須是未來時間 6.只有時段沒有具體時間：早上預設09:00，下午預設14:00，晚上預設20:00
+
+使用者訊息：${text}`;
+  const result = await model.generateContent(prompt);
+  const raw = result.response.text().trim().replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
   const data = JSON.parse(raw);
   return { intent: data.intent, content: data.content || text, datetime: data.datetime ? new Date(data.datetime) : null, deleteId: data.deleteId || null };
 }
