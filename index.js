@@ -429,15 +429,17 @@ async function parseWithGemini(text) {
     timeZone: 'Asia/Taipei', year: 'numeric', month: '2-digit', day: '2-digit',
     hour: '2-digit', minute: '2-digit', weekday: 'long'
   });
-  const model = genai.getGenerativeModel({ model: 'gemini-1.5-flash' });
+  const model = genai.getGenerativeModel({ model: 'gemini-2.0-flash' });
   const prompt = `你是LINE提醒機器人的語意解析器。現在台灣時間：${nowStr}
 回傳純JSON（不要markdown代碼塊）：
 {"intent":"set_reminder|list_reminders|delete_reminder|unknown","content":"提醒內容（去掉時間詞和觸發詞）","datetime":"ISO8601台灣時間或null","deleteId":數字或null}
 規則：1.含提醒我/幫我記得/別忘了/X點/明天/後天/下週/小時後→set_reminder 2.含提醒列表/查看提醒→list_reminders 3.含刪除/取消+數字→delete_reminder 4.其他→unknown 5.datetime必須是未來時間 6.只有時段沒有具體時間：早上預設09:00，下午預設14:00，晚上預設20:00
 
 使用者訊息：${text}`;
+  console.log('[Gemini] 呼叫中，文字：', text.substring(0, 30));
   const result = await model.generateContent(prompt);
   const raw = result.response.text().trim().replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+  console.log('[Gemini] 回傳：', raw.substring(0, 100));
   const data = JSON.parse(raw);
   return { intent: data.intent, content: data.content || text, datetime: data.datetime ? new Date(data.datetime) : null, deleteId: data.deleteId || null };
 }
