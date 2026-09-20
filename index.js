@@ -6,6 +6,7 @@ const { GoogleGenerativeAI } = require('@google/generative-ai');
 const { MongoClient } = require('mongodb');
 const { google } = require('googleapis');
 const https = require('https');
+const { backupInsta360ToGoogleDrive, deleteOldBackups } = require('./insta360-backup');
 
 // ─── MongoDB 連線 ────────────────────────────────────────────
 let _db = null;
@@ -81,6 +82,17 @@ async function dbCountReminders() {
   return db.collection('reminders').countDocuments();
 }
 
+async function dbSaveSleepLog(sleepData) {
+  const db = await getDB();
+  const logDate = sleepData.date || new Date().toISOString().split('T')[0];
+  const result = await db.collection('sleep_logs').updateOne(
+    { date: logDate },
+    { $set: { ...sleepData, date: logDate, updated_at: new Date() } },
+    { upsert: true }
+  );
+  return result;
+}
+
 async function dbGetGoogleTokens(userId) {
   const db = await getDB();
   const doc = await db.collection('googleTokens').findOne({ userId });
@@ -123,6 +135,8 @@ async function dbRemoveWeatherSubscriber(userId) {
 
 // ─── 應用程式初始化 ──────────────────────────────────────────
 const app = express();
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
 const lineConfig = {
   channelAccessToken: process.env.LINE_CHANNEL_ACCESS_TOKEN,
@@ -573,6 +587,38 @@ cron.schedule('* * * * *', async () => {
   } catch (e) { console.error('[Cron] 提醒檢查失敗：', e.message); }
 });
 
+// ─── Cron：每天 03:00 備份 INSTA360 相簾 ──────────────────────
+cron.schedule('0 3 * * *', async () => {
+  console.log('[INSTA360] 開始每日備份任務');
+  await runInsta360Backup();
+}, { timeZone: 'Asia/Taipei' });
+
+// ─── INSTA360 備份定時任務 ──────────────────────────────────
+async function runInsta360Backup() {
+  try {
+    const tokens = await dbGetGoogleTokens('insta360_backup_service');
+    if (!tokens || !tokens.refresh_token) {
+      console.warn('[INSTA360] ⚠️ 缺少 Google 授權 token，跳過備份');
+      return;
+    }
+
+    const oauth2Client = getOAuth2Client();
+    oauth2Client.setCredentials(tokens);
+
+    const googleFolderId = process.env.GOOGLE_INSTA360_FOLDER_ID || '1i4p--LBe4K7C9p9aeGg5jsut96KhsT59';
+    const backupResult = await backupInsta360ToGoogleDrive(google, oauth2Client, googleFolderId);
+
+    console.log(`[INSTA360] 備份結果: ${backupResult.ok}/${backupResult.total}`);
+
+    if (backupResult.ok > 0) {
+      const deleteResult = await deleteOldBackups(google, oauth2Client);
+      console.log(`[INSTA360] 刪除舊備份: ${deleteResult.ok}/${deleteResult.total}`);
+    }
+  } catch (e) {
+    console.error('[INSTA360] 備份任務失敗:', e.message);
+  }
+}
+
 // ─── 天氣推播 ────────────────────────────────────────────────
 async function pushWeatherToSubscribers() {
   // 防止重複推播：同一天只推一次（以 Asia/Taipei 日期判斷）
@@ -619,11 +665,45 @@ async function pushWeatherToSubscribers() {
 // ─── HTTP 端點 ───────────────────────────────────────────────
 app.get('/', (req, res) => res.send('LINE Bot Secretary is running! 🤖'));
 
+app.post('/health/sleep', async (req, res) => {
+  try {
+    const secret = process.env.HEALTH_SYNC_SECRET || 'sleep2024';
+    if (req.query.secret !== secret) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    const sleepData = req.body;
+    if (!sleepData || typeof sleepData !== 'object') {
+      return res.status(400).json({ error: '睡眠資料格式錯誤' });
+    }
+
+    // 驗證必要欄位
+    const required = ['date', 'bedtime', 'wake_time', 'duration_seconds'];
+    const missing = required.filter(f => !(f in sleepData));
+    if (missing.length > 0) {
+      return res.status(400).json({ error: `缺少必要欄位: ${missing.join(', ')}` });
+    }
+
+    await dbSaveSleepLog(sleepData);
+    console.log(`[睡眠] 已儲存 ${sleepData.date} 的睡眠資料 (${sleepData.duration_seconds}s)`);
+    res.json({ ok: true, date: sleepData.date });
+  } catch (e) {
+    console.error('[睡眠] 儲存失敗:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.get('/cron/weather', async (req, res) => {
   if (req.query.secret !== (process.env.CRON_SECRET || 'weather2024')) return res.status(401).send('Unauthorized');
   const result = await pushWeatherToSubscribers();
   if (result.error) return res.status(500).send(`天氣取得失敗：${result.error}`);
   res.send(`✅ 天氣推播完成，成功 ${result.ok}/${result.total}`);
+});
+
+app.get('/cron/insta360-backup', async (req, res) => {
+  if (req.query.secret !== (process.env.CRON_SECRET || 'weather2024')) return res.status(401).send('Unauthorized');
+  await runInsta360Backup();
+  res.send('✅ INSTA360 備份任務已開始，請查看日誌');
 });
 
 // ─── 啟動 ────────────────────────────────────────────────────

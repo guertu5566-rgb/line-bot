@@ -16,6 +16,8 @@
     "googleapis": "^171.4.0",
     "@google/generative-ai": "^0.21.0",
     "mongodb": "^6.0.0",
-    "node-cron": "^3.0.3"
+    "node-cron": "^3.0.3",
+    "puppeteer": "^21.6.0",
+    "axios": "^1.6.5"
   }
 }
