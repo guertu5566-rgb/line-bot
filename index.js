@@ -135,8 +135,7 @@ async function dbRemoveWeatherSubscriber(userId) {
 
 // ─── 應用程式初始化 ──────────────────────────────────────────
 const app = express();
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+// 注意：不要全域使用 express.json()，LINE webhook 需要原始 body 驗證簽章
 
 const lineConfig = {
   channelAccessToken: process.env.LINE_CHANNEL_ACCESS_TOKEN,
@@ -780,7 +779,7 @@ async function pushWeatherToSubscribers() {
 // ─── HTTP 端點 ───────────────────────────────────────────────
 app.get('/', (req, res) => res.send('LINE Bot Secretary is running! 🤖'));
 
-app.post('/health/sleep', async (req, res) => {
+app.post('/health/sleep', express.json(), async (req, res) => {
   try {
     const secret = process.env.HEALTH_SYNC_SECRET || 'sleep2024';
     if (req.query.secret !== secret) {
