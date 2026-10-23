@@ -6,7 +6,7 @@ const { GoogleGenerativeAI } = require('@google/generative-ai');
 const { MongoClient } = require('mongodb');
 const { google } = require('googleapis');
 const https = require('https');
-const { backupInsta360ToGoogleDrive, deleteOldBackups } = require('./insta360-backup');
+const tessie = require('./tessie');
 
 // ─── MongoDB 連線 ────────────────────────────────────────────
 let _db = null;
@@ -421,6 +421,16 @@ async function handleMessage(event) {
     });
   }
 
+  // Tesla：確認／取消待執行的敏感指令
+  if (/^(確認|取消)$/.test(text) && await hasPendingTeslaCommand(userId)) {
+    return confirmTeslaCommand(userId, text === '確認', event.replyToken);
+  }
+
+  // Tesla 車輛查詢與控制（透過 Tessie）
+  if (isTeslaMessage(text)) {
+    return handleTesla(userId, text, event.replyToken);
+  }
+
   let parsed = null;
   if (genai) {
     try { parsed = await parseWithGemini(text); }
@@ -479,6 +489,143 @@ function parseByKeyword(text) {
     return { intent: 'set_reminder', datetime: dt, content: content || text };
   }
   return null;
+}
+
+// ─── Tesla（Tessie）────────────────────────────────────────────
+const TESLA_KEYWORDS = /特斯拉|tesla|我的車|車子|愛車|車況|車輛|電量|續航|充電|冷氣|空調|車內溫度|上鎖|鎖車|解鎖|開鎖|閃燈|按喇叭|前車廂|後車廂|尾門|車在哪|停在哪/i;
+const TESLA_PENDING_TTL_MS = 2 * 60 * 1000;
+
+function isTeslaMessage(text) {
+  // 「提醒我…」之類的句子交給提醒功能
+  if (/提醒|記得|別忘/.test(text)) return false;
+  return TESLA_KEYWORDS.test(text);
+}
+
+function isTeslaOwner(userId) {
+  const owners = (process.env.TESLA_OWNER_USER_ID || '').split(',').map(s => s.trim()).filter(Boolean);
+  return owners.includes(userId);
+}
+
+async function parseTeslaWithGemini(text) {
+  const model = genai.getGenerativeModel({ model: 'gemini-2.5-flash' });
+  const prompt = `你是 Tesla 車輛控制機器人的語意解析器。
+回傳純JSON（不要markdown代碼塊）：{"action":"動作","temperature":數字或null}
+可用動作：
+status（查車況/電量/續航/溫度/有沒有鎖）、location（車在哪）、lock（上鎖）、unlock（解鎖）、
+climate_on（開冷氣/空調/預熱）、climate_off（關冷氣/空調）、set_temp（設定溫度，temperature 為 15~28 的攝氏溫度）、
+charge_start（開始充電）、charge_stop（停止充電）、flash（閃燈）、honk（按喇叭）、
+front_trunk（開前車廂）、rear_trunk（開/關後車廂、尾門）、wake（喚醒）、unknown（其他）
+若「開冷氣」同時指定溫度，action 用 set_temp。
+
+使用者訊息：${text}`;
+  const result = await model.generateContent(prompt);
+  const raw = result.response.text().trim().replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+  console.log('[Tesla] Gemini 回傳：', raw.substring(0, 100));
+  return JSON.parse(raw);
+}
+
+function parseTeslaByKeyword(text) {
+  const temp = text.match(/(\d{2}(?:\.\d)?)\s*(度|°)/);
+  if (temp && /冷氣|空調|溫度/.test(text)) return { action: 'set_temp', temperature: parseFloat(temp[1]) };
+  if (/在哪|位置|停在/.test(text)) return { action: 'location' };
+  if (/解鎖|開鎖/.test(text)) return { action: 'unlock' };
+  if (/上鎖|鎖車/.test(text)) return { action: 'lock' };
+  if (/(關|停).*(冷氣|空調)/.test(text)) return { action: 'climate_off' };
+  if (/冷氣|空調|預熱/.test(text)) return { action: 'climate_on' };
+  if (/(停止|停|關).*充電/.test(text)) return { action: 'charge_stop' };
+  if (/開始充電|充電開始/.test(text)) return { action: 'charge_start' };
+  if (/閃燈/.test(text)) return { action: 'flash' };
+  if (/喇叭/.test(text)) return { action: 'honk' };
+  if (/前車廂/.test(text)) return { action: 'front_trunk' };
+  if (/後車廂|尾門/.test(text)) return { action: 'rear_trunk' };
+  if (/喚醒|叫醒/.test(text)) return { action: 'wake' };
+  return { action: 'status' };
+}
+
+async function handleTesla(userId, text, replyToken) {
+  const reply = (msg) => client.replyMessage({ replyToken, messages: [{ type: 'text', text: msg }] });
+
+  if (!process.env.TESSIE_API_TOKEN) return reply('🚗 Tesla 功能尚未啟用（請設定 TESSIE_API_TOKEN）');
+  if (!isTeslaOwner(userId)) {
+    console.warn(`[Tesla] 拒絕非車主操作：${userId}`);
+    return reply('🚫 你沒有權限操作這台車');
+  }
+
+  let parsed = null;
+  if (genai) {
+    try { parsed = await parseTeslaWithGemini(text); }
+    catch (e) { console.error('[Tesla] Gemini 解析失敗，改用關鍵字：', e.message); }
+  }
+  if (!parsed || !parsed.action || parsed.action === 'unknown') parsed = parseTeslaByKeyword(text);
+  const { action } = parsed;
+
+  try {
+    if (action === 'status') return reply(tessie.formatState(await tessie.getState()));
+    if (action === 'location') return reply(tessie.formatLocation(await tessie.getLocation()));
+
+    const params = {};
+    if (action === 'set_temp') {
+      const t = Number(parsed.temperature);
+      if (!(t >= 15 && t <= 28)) return reply('❓ 溫度請設定在 15~28°C 之間，例如「冷氣開 22 度」');
+      params.temperature = t;
+    }
+
+    if (tessie.SENSITIVE_COMMANDS.has(action)) {
+      const db = await getDB();
+      await db.collection('teslaPending').updateOne(
+        { userId },
+        { $set: { userId, action, params, expiresAt: Date.now() + TESLA_PENDING_TTL_MS } },
+        { upsert: true }
+      );
+      return reply(`⚠️ 即將執行「${tessie.COMMANDS[action].label}」\n\n請在 2 分鐘內回覆「確認」執行，或回覆「取消」`);
+    }
+
+    return executeTeslaCommand(userId, action, params, replyToken);
+  } catch (e) {
+    console.error(`[Tesla] ${action} 失敗：`, e.response?.status, e.message);
+    return reply(`❌ Tesla 操作失敗：${e.response?.data?.error || e.message}`);
+  }
+}
+
+async function hasPendingTeslaCommand(userId) {
+  const db = await getDB();
+  const pending = await db.collection('teslaPending').findOne({ userId });
+  return !!pending && pending.expiresAt > Date.now();
+}
+
+async function confirmTeslaCommand(userId, confirmed, replyToken) {
+  const db = await getDB();
+  const pending = await db.collection('teslaPending').findOneAndDelete({ userId });
+  if (!confirmed) {
+    return client.replyMessage({ replyToken, messages: [{ type: 'text', text: '✅ 已取消' }] });
+  }
+  if (!pending || pending.expiresAt <= Date.now() || !isTeslaOwner(userId)) {
+    return client.replyMessage({ replyToken, messages: [{ type: 'text', text: '⌛ 確認已逾時，請重新下指令' }] });
+  }
+  return executeTeslaCommand(userId, pending.action, pending.params || {}, replyToken);
+}
+
+// 車子休眠時指令可能要等很久，LINE 的 replyToken 會過期：
+// 25 秒內完成就直接回覆，否則先回「執行中」，完成後再推播結果
+async function executeTeslaCommand(userId, action, params, replyToken) {
+  const label = tessie.COMMANDS[action].label + (params.temperature ? ` ${params.temperature}°C` : '');
+  console.log(`[Tesla] 執行 ${action}`, params);
+  const job = tessie.runCommand(action, params)
+    // 設定溫度後順便開啟空調（「冷氣開22度」）
+    .then(ok => ok && action === 'set_temp' ? tessie.runCommand('climate_on') : ok)
+    .then(ok => ok ? `✅ ${label} 完成` : `❌ ${label} 失敗（車輛未回應）`)
+    .catch(e => {
+      console.error(`[Tesla] ${action} 失敗：`, e.response?.status, e.message);
+      return `❌ ${label} 失敗：${e.response?.data?.error || e.message}`;
+    });
+  const timeout = new Promise(resolve => setTimeout(() => resolve(null), 25000));
+
+  const quick = await Promise.race([job, timeout]);
+  if (quick) return client.replyMessage({ replyToken, messages: [{ type: 'text', text: quick }] });
+
+  await client.replyMessage({ replyToken, messages: [{ type: 'text', text: `⏳ ${label} 執行中，車子可能在休眠，完成後通知你` }] });
+  const result = await job;
+  await client.pushMessage({ to: userId, messages: [{ type: 'text', text: result }] });
 }
 
 async function saveReminder(userId, content, eventAt, replyToken) {
@@ -557,7 +704,7 @@ async function deleteReminder(userId, groupId, replyToken) {
 async function sendHelp(replyToken) {
   await client.replyMessage({
     replyToken,
-    messages: [{ type: 'text', text: '你好！我是提醒小秘書 📋\n\n📝 設定提醒範例：\n「明天下午3點開會」\n「幫我記得後天交報告」\n「一小時後提醒我喝水」\n「下週一早上9點看醫生」\n「提醒我今晚8點追劇」\n\n📋 查看提醒：「提醒列表」\n🗑️ 刪除提醒：「刪除 1」\n📅 連結Google日曆：「綁定Google日曆」\n🌤️ 每日天氣：「訂閱天氣」\n🌤️ 取消天氣：「取消天氣」' }]
+    messages: [{ type: 'text', text: '你好！我是提醒小秘書 📋\n\n📝 設定提醒範例：\n「明天下午3點開會」\n「幫我記得後天交報告」\n「一小時後提醒我喝水」\n「下週一早上9點看醫生」\n「提醒我今晚8點追劇」\n\n📋 查看提醒：「提醒列表」\n🗑️ 刪除提醒：「刪除 1」\n📅 連結Google日曆：「綁定Google日曆」\n🌤️ 每日天氣：「訂閱天氣」\n🌤️ 取消天氣：「取消天氣」\n\n🚗 Tesla：「車況」「車在哪」「冷氣開22度」「關冷氣」「上鎖」「解鎖」「開始充電」' }]
   });
 }
 
@@ -586,38 +733,6 @@ cron.schedule('* * * * *', async () => {
     }
   } catch (e) { console.error('[Cron] 提醒檢查失敗：', e.message); }
 });
-
-// ─── Cron：每天 03:00 備份 INSTA360 相簾 ──────────────────────
-cron.schedule('0 3 * * *', async () => {
-  console.log('[INSTA360] 開始每日備份任務');
-  await runInsta360Backup();
-}, { timeZone: 'Asia/Taipei' });
-
-// ─── INSTA360 備份定時任務 ──────────────────────────────────
-async function runInsta360Backup() {
-  try {
-    const tokens = await dbGetGoogleTokens('insta360_backup_service');
-    if (!tokens || !tokens.refresh_token) {
-      console.warn('[INSTA360] ⚠️ 缺少 Google 授權 token，跳過備份');
-      return;
-    }
-
-    const oauth2Client = getOAuth2Client();
-    oauth2Client.setCredentials(tokens);
-
-    const googleFolderId = process.env.GOOGLE_INSTA360_FOLDER_ID || '1i4p--LBe4K7C9p9aeGg5jsut96KhsT59';
-    const backupResult = await backupInsta360ToGoogleDrive(google, oauth2Client, googleFolderId);
-
-    console.log(`[INSTA360] 備份結果: ${backupResult.ok}/${backupResult.total}`);
-
-    if (backupResult.ok > 0) {
-      const deleteResult = await deleteOldBackups(google, oauth2Client);
-      console.log(`[INSTA360] 刪除舊備份: ${deleteResult.ok}/${deleteResult.total}`);
-    }
-  } catch (e) {
-    console.error('[INSTA360] 備份任務失敗:', e.message);
-  }
-}
 
 // ─── 天氣推播 ────────────────────────────────────────────────
 async function pushWeatherToSubscribers() {
@@ -698,12 +813,6 @@ app.get('/cron/weather', async (req, res) => {
   const result = await pushWeatherToSubscribers();
   if (result.error) return res.status(500).send(`天氣取得失敗：${result.error}`);
   res.send(`✅ 天氣推播完成，成功 ${result.ok}/${result.total}`);
-});
-
-app.get('/cron/insta360-backup', async (req, res) => {
-  if (req.query.secret !== (process.env.CRON_SECRET || 'weather2024')) return res.status(401).send('Unauthorized');
-  await runInsta360Backup();
-  res.send('✅ INSTA360 備份任務已開始，請查看日誌');
 });
 
 // ─── 啟動 ────────────────────────────────────────────────────
