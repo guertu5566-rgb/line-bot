@@ -627,6 +627,53 @@ async function executeTeslaCommand(userId, action, params, replyToken) {
   await client.pushMessage({ to: userId, messages: [{ type: 'text', text: result }] });
 }
 
+// ─── Tesla：忘記鎖車通知 ─────────────────────────────────────
+// 由 GitHub Actions 每 10 分鐘呼叫 /cron/tesla-lock-check
+// 停好車（P 檔、車內沒人）卻沒上鎖超過 N 分鐘，推播一次給車主；上鎖後重置
+async function checkTeslaUnlocked() {
+  const owners = (process.env.TESLA_OWNER_USER_ID || '').split(',').map(s => s.trim()).filter(Boolean);
+  if (!process.env.TESSIE_API_TOKEN || owners.length === 0) return 'Tesla 未設定，跳過';
+
+  const alertMin = parseInt(process.env.TESLA_UNLOCK_ALERT_MIN || '10');
+  const state = await tessie.getState(); // 讀快取，不會喚醒車子
+  const v = state.vehicle_state || {};
+  const shift = state.drive_state?.shift_state;
+  const parkedAndEmpty = (!shift || shift === 'P') && !v.is_user_present;
+  const unlocked = v.locked === false && parkedAndEmpty;
+
+  const db = await getDB();
+  const settings = db.collection('settings');
+  const record = await settings.findOne({ key: 'teslaUnlock' });
+
+  if (!unlocked) {
+    if (record) await settings.deleteOne({ key: 'teslaUnlock' });
+    return v.locked ? '已上鎖' : '未上鎖但車內有人或行駛中';
+  }
+
+  const now = Date.now();
+  if (!record) {
+    await settings.insertOne({ key: 'teslaUnlock', since: now, notified: false });
+    return '剛發現未上鎖，開始計時';
+  }
+
+  const minutes = Math.round((now - record.since) / 60000);
+  if (record.notified || minutes < alertMin) return `未上鎖 ${minutes} 分鐘`;
+
+  let place = '';
+  try {
+    const loc = await tessie.getLocation();
+    place = `\n📍 ${loc.saved_location || loc.address || ''}`;
+  } catch (e) { console.error('[Tesla] 取得位置失敗：', e.message); }
+
+  const text = `🔓 你的車已經超過 ${minutes} 分鐘沒上鎖！${place}\n\n回覆「上鎖」我幫你鎖`;
+  for (const uid of owners) {
+    await client.pushMessage({ to: uid, messages: [{ type: 'text', text }] });
+  }
+  await settings.updateOne({ key: 'teslaUnlock' }, { $set: { notified: true } });
+  console.log(`[Tesla] 已推播忘記鎖車通知（${minutes} 分鐘）`);
+  return `已通知（未上鎖 ${minutes} 分鐘）`;
+}
+
 async function saveReminder(userId, content, eventAt, replyToken) {
   const now = new Date();
   const groupId = await getNextId();
@@ -812,6 +859,16 @@ app.get('/cron/weather', async (req, res) => {
   const result = await pushWeatherToSubscribers();
   if (result.error) return res.status(500).send(`天氣取得失敗：${result.error}`);
   res.send(`✅ 天氣推播完成，成功 ${result.ok}/${result.total}`);
+});
+
+app.get('/cron/tesla-lock-check', async (req, res) => {
+  if (req.query.secret !== (process.env.CRON_SECRET || 'weather2024')) return res.status(401).send('Unauthorized');
+  try {
+    res.send(`✅ ${await checkTeslaUnlocked()}`);
+  } catch (e) {
+    console.error('[Tesla] 鎖車檢查失敗：', e.response?.status, e.message);
+    res.status(500).send(`鎖車檢查失敗：${e.message}`);
+  }
 });
 
 // ─── 啟動 ────────────────────────────────────────────────────

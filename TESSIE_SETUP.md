@@ -40,7 +40,16 @@ TESSIE_VIN=
 
 車子休眠時指令可能要 30 秒以上，機器人會先回「執行中」，完成後再推播結果。
 
-## 4. 在 Claude 中使用
+## 4. 忘記鎖車通知
+
+GitHub Actions（`.github/workflows/tesla-lock-check.yml`）每 10 分鐘呼叫 `/cron/tesla-lock-check`。
+車子停好（P 檔、車內沒人）卻沒上鎖超過 10 分鐘，會推播一次 LINE 給車主，上鎖後重置。
+讀的是 Tessie 快取資料，不會喚醒車子耗電。
+
+- 調整時間：Render 設定 `TESLA_UNLOCK_ALERT_MIN`（預設 10 分鐘）
+- 手動測試：GitHub → Actions → Tesla 忘記鎖車檢查 → Run workflow
+
+## 5. 在 Claude 中使用
 
 Tessie 有官方 MCP 伺服器，不需要自己架：
 

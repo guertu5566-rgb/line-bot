@@ -1,0 +1,25 @@
+name: Tesla 忘記鎖車檢查
+
+on:
+  schedule:
+    # 每 10 分鐘（GitHub 排程可能延遲幾分鐘）
+    - cron: '*/10 * * * *'
+  workflow_dispatch:  # 允許手動觸發測試
+
+jobs:
+  check-lock:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 檢查車輛是否上鎖
+        run: |
+          # Render 免費方案休眠時要約 50 秒喚醒，timeout 給長一點
+          RESPONSE=$(curl -s -m 120 -w "\n%{http_code}" \
+            "https://line-bot-secretary.onrender.com/cron/tesla-lock-check?secret=${{ secrets.CRON_SECRET }}")
+          HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+          BODY=$(echo "$RESPONSE" | head -n-1)
+          echo "HTTP 狀態碼: $HTTP_CODE"
+          echo "回應內容: $BODY"
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "❌ 檢查失敗！HTTP $HTTP_CODE"
+            exit 1
+          fi
